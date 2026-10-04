@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Activity theme; Compose draws the actual UI. Kept dark so the splash never flashes white. -->
+    <style name="Theme.Voidrunner" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#070B16</item>
+        <item name="android:statusBarColor">#070B16</item>
+        <item name="android:navigationBarColor">#070B16</item>
+    </style>
+</resources>
