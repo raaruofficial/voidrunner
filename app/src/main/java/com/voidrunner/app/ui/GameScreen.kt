@@ -1,7 +1,7 @@
 package com.voidrunner.app.ui
 
 import android.annotation.SuppressLint
-import android.app.Activity
+import androidx.activity.ComponentActivity
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
@@ -34,7 +34,7 @@ import com.voidrunner.app.wallet.VoidrunnerWalletBridge
 @Composable
 fun GameScreen(navController: NavController, onExit: () -> Unit) {
     val context = LocalContext.current
-    val activity = context as Activity
+    val activity = context as ComponentActivity
     val walletManager = remember { (context.applicationContext as VoidrunnerApp).walletManager }
     val webView = remember { mutableStateOf<WebView?>(null) }
 

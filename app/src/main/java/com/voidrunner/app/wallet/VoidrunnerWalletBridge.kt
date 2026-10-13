@@ -1,6 +1,7 @@
 package com.voidrunner.app.wallet
 
-import android.app.Activity
+import android.util.Base64
+import androidx.activity.ComponentActivity
 import android.webkit.JavascriptInterface
 import com.solana.mobilewalletadapter.clientlib.ActivityResultSender
 import kotlinx.coroutines.CoroutineScope
@@ -33,7 +34,7 @@ import org.json.JSONObject
  * Seeker's Seed Vault wallet through Mobile Wallet Adapter.
  */
 class VoidrunnerWalletBridge(
-    private val activity: Activity,
+    private val activity: ComponentActivity,
     private val walletManager: WalletManager,
     private val evaluateJs: (script: String) -> Unit
 ) {
@@ -97,17 +98,26 @@ class VoidrunnerWalletBridge(
     }
 
     /**
-     * Ask the wallet to sign (and send) a serialized Solana transaction.
-     *
-     * STUB in step 1 — resolves `{ ok: false, error: "not_implemented" }`.
-     * Full implementation lands with the game wiring in step 2, using
-     * MWA 2.0 `signAndSendTransactions` (the 2.0 spec deprecates
-     * sign-only `signTransactions`).
+     * Ask the wallet to sign (and send) a serialized Solana transaction,
+     * via MWA 2.0 `signAndSendTransactions` (the 2.0 spec deprecates
+     * sign-only `signTransactions`). Resolves with
+     * `{ ok: true, data: { signature } }` (Base58, first transaction).
      */
     @JavascriptInterface
     fun signTransaction(requestId: String, transactionBase64: String): String {
         scope.launch {
-            resolveErr(requestId, "not_implemented: signTransaction lands in step 2 (game wiring)")
+            val tx = runCatching { Base64.decode(transactionBase64, Base64.DEFAULT) }.getOrElse { e ->
+                resolveErr(requestId, "invalid transaction encoding: ${e.message}")
+                return@launch
+            }
+            walletManager.signAndSendTransactions(ActivityResultSender(activity), listOf(tx)).fold(
+                onSuccess = { sigs ->
+                    resolveOk(requestId, JSONObject().put("signature", sigs.firstOrNull() ?: ""))
+                },
+                onFailure = { e ->
+                    resolveErr(requestId, e.message ?: "sign-and-send failed")
+                }
+            )
         }
         return ack(requestId)
     }

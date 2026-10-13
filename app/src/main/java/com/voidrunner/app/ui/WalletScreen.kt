@@ -1,6 +1,6 @@
 package com.voidrunner.app.ui
 
-import android.app.Activity
+import androidx.activity.ComponentActivity
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -45,7 +45,7 @@ import kotlinx.coroutines.launch
 @Composable
 fun WalletScreen(navController: NavController) {
     val context = LocalContext.current
-    val activity = context as Activity
+    val activity = context as ComponentActivity
     val walletManager = (context.applicationContext as VoidrunnerApp).walletManager
     val state by walletManager.uiState.collectAsState()
     val scope = rememberCoroutineScope()
