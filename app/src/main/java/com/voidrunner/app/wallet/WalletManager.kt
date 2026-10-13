@@ -129,19 +129,40 @@ class WalletManager {
         }
 
     /**
-     * Sign Solana transactions. STUB for step 1: the transaction-building code
-     * (web3-style builders) lands with the game wiring in step 2. The MWA call
-     * itself is `signAndSendTransactions` per the 2.0 spec (`signTransactions`
-     * is deprecated).
+     * Ask the wallet to sign and send already-built transactions, per the
+     * MWA 2.0 spec (`signAndSendTransactions`; `signTransactions` is
+     * deprecated). Callers supply serialized transactions; this returns the
+     * Base58 signature of each, in order.
      */
     suspend fun signAndSendTransactions(
         sender: ActivityResultSender,
         serializedTransactions: List<ByteArray>
-    ): Result<List<String>> {
-        // TODO(step 2): build real transactions, then:
-        //   walletAdapter.transact(sender) { signAndSendTransactions(serializedTransactions.toTypedArray()) }
-        //   -> result.successPayload?.signatures -> Base58.encode each
-        return Result.failure(UnsupportedOperationException("signAndSendTransactions lands in step 2 (game wiring)"))
+    ): Result<List<String>> = withContext(Dispatchers.IO) {
+        _uiState.value = WalletUiState.Working
+        val result = runCatching {
+            walletAdapter.transact(sender) {
+                signAndSendTransactions(serializedTransactions.toTypedArray())
+            }
+        }.getOrElse { e ->
+            restoreConnectedState()
+            return@withContext Result.failure(e)
+        }
+        when (result) {
+            is TransactionResult.Success -> {
+                val sigs = result.successPayload?.signatures
+                restoreConnectedState()
+                if (sigs != null) Result.success(sigs.map { Base58.encode(it) })
+                else Result.failure(IllegalStateException("Wallet returned no signatures"))
+            }
+            is TransactionResult.NoWalletFound -> {
+                restoreConnectedState()
+                Result.failure(IllegalStateException("No MWA-compatible wallet found on this device"))
+            }
+            is TransactionResult.Failure -> {
+                restoreConnectedState()
+                Result.failure(result.e)
+            }
+        }
     }
 
     /** Revoke the session; the next connect shows the approval dialog again. */

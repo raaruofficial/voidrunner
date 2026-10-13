@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Launcher icon as a vector: theme-dark field, cyan bolt, pale core.
+     Vector so the icon is identical at every density with no raster assets. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#070B16"
+        android:pathData="M0,0h108v108H0Z" />
+    <path
+        android:fillColor="#22D3EE"
+        android:pathData="M47.1,10.8 L73,10.8 L58.3,43.6 L74.7,43.6 L40.2,97.2 L52.3,59.2 L35,59.2 Z" />
+    <path
+        android:fillColor="#E0FEFF"
+        android:pathData="M50.2,30.3 L64.5,30.3 L56.4,48.3 L65.4,48.3 L46.4,77.8 L53.1,56.9 L43.5,56.9 Z" />
+</vector>
