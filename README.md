@@ -49,6 +49,13 @@ gradle :app:assembleDebug
 
 The APK lands in `app/build/outputs/apk/debug/`.
 
+## Signed release
+
+The current signed build is **[v1.0.1](https://github.com/raaruofficial/voidrunner/releases/tag/v1.0.1)** —
+the release APK signed with the publisher keystore (certificate
+CN=raaru.skr, SHA-256 `30:7F:68:39…81:11`), package `com.voidrunner.app`.
+The release page also carries the demo video and pitch deck of record.
+
 ## Status
 
 Built for the Solana Mobile CLOCK IN hackathon (October 2026) as a
