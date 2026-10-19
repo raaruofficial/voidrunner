@@ -16,11 +16,12 @@ back on the fleet.
   hard-capped so skill still decides the fight.
 - **Procedural dark-synthwave score** — generated in-engine (WebAudio, no
   audio files), with music mixed as the star and effects ducking under it.
-- **.skr identity** — sign-in via Mobile Wallet Adapter 2.0; one identity
-  across the arcade.
+- **.skr identity** — sign in by typing your .skr handle; one identity
+  across the arcade. The MWA 2.0 layer in this shell is for on-device
+  wallet signing, not sign-in.
 - **Arcade pricing, in play units** — 25¢ per play · 14 plays for $3.50 ·
   30-day pass for $7. Voluntary SKR support ladder for pilots who want to
-  feed the funnel.
+  feed the funnel — simulated in this build, like all funds in it.
 
 ## This repo
 
