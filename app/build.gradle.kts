@@ -65,6 +65,14 @@ android {
     }
 
     packaging { resources { excludes += "/META-INF/{AL2.0,LGPL2.1}" } }
+
+    lint {
+        // The lifecycle lint detector crashes on this tree with an
+        // IncompatibleClassChangeError inside lint itself (Kotlin analysis API
+        // incompatibility, reproduced in CI run 39307990936 on MainActivity.kt).
+        // Disable that one check only; every other lint check stays on.
+        disable += "NullSafeMutableLiveData"
+    }
 }
 
 dependencies {
