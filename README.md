@@ -51,10 +51,13 @@ The APK lands in `app/build/outputs/apk/debug/`.
 
 ## Signed release
 
-The current signed build is **[v1.0.1](https://github.com/raaruofficial/voidrunner/releases/tag/v1.0.1)** —
-the release APK signed with the publisher keystore (certificate
-CN=raaru.skr, SHA-256 `30:7F:68:39…81:11`), package `com.voidrunner.app`.
-The release page also carries the demo video and pitch deck of record.
+The current signed build is **[v1.0.2](https://github.com/raaruofficial/voidrunner/releases/tag/v1.0.2)** —
+the release APK (declared versionName `1.0.2`, versionCode 2) signed with
+the publisher keystore (certificate CN=raaru.skr, SHA-256 `30:7F:68:39…81:11`),
+package `com.voidrunner.app`. Assets in the earlier v1.0.1 release declare
+versionName 0.1.0-hackathon (versionCode 1); v1.0.1 is the git tag of the
+build commit `d577fd0`. The v1.0.1 release page also carries the CLOCK IN
+filing's demo video and pitch deck of record.
 
 ## Status
 
