@@ -53,6 +53,7 @@ jobs:
       - name: File the instrument (script + its diff vs the tag's script)
         run: |
           cp tools/verify-cold-run-m8a.sh verify-evidence/verify-cold-run-m8a.sh
+          git fetch origin tag v1.0.2
           git show v1.0.2:tools/verify-cold-run.sh > /tmp/tag-verify-cold-run.sh
           diff -u /tmp/tag-verify-cold-run.sh tools/verify-cold-run-m8a.sh \
             > verify-evidence/m8a-diff.txt || true
