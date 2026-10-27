@@ -17,8 +17,11 @@ permissions:
 jobs:
   verify-artefact-m8a:
     name: M8-A cold run of sealed artefact A-1
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # M8-A2 host (JUDGE Amendment 3, section 4.2): macOS arm64 runner —
+    # the ubuntu execution (run 40569832905) died in emulator boot under
+    # -accel off software emulation. Script, pin, and asserts unchanged.
+    runs-on: macos-14
+    timeout-minutes: 90
     env:
       ARTEFACT_ID: "12761853468"
       EXPECTED_SHA256: "fce0171baad53eed25d86e606ec635810fe38047148fe8e5d53ea7d5dc89cabc"
@@ -58,13 +61,36 @@ jobs:
           diff -u /tmp/tag-verify-cold-run.sh tools/verify-cold-run-m8a.sh \
             > verify-evidence/m8a-diff.txt || true
           wc -l verify-evidence/m8a-diff.txt
+          git fetch origin b4557993cc7aad9476340c27702f71a5b1190f0c || true
+          git show b4557993cc7aad9476340c27702f71a5b1190f0c:.github/workflows/verify-artefact-m8a.yml \
+            > /tmp/lane-40569832905.yml 2>/dev/null || true
+          diff -u /tmp/lane-40569832905.yml .github/workflows/verify-artefact-m8a.yml \
+            > verify-evidence/workflow-diff-vs-40569832905.txt || true
+
+      - name: Record host selection (Amendment 3, section 4.2a)
+        run: |
+          {
+            echo "lane: M8-A2 (JUDGE Amendment 3)"
+            echo "runner: macos-14 (GitHub Apple Silicon arm64)"
+            echo "system_image_arch: arm64-v8a (required by the arm64 host)"
+            echo "profile: pixel_7_pro (unchanged — capture continuity with prior lanes)"
+            echo "emulator_boot_timeout: 1200 (raised from 600 per Amendment 3 section 4.2b)"
+            echo "reason: the ubuntu execution (run 40569832905) ran the emulator with -accel off"
+            echo "  (log: 'Disabling Linux hardware acceleration', no KVM) and the emulator never"
+            echo "  became adb-responsive inside the 600s window; the same profile booted in 457s"
+            echo "  on a luckier ubuntu draw in the tag runs. macOS arm64 provides hardware"
+            echo "  virtualisation (HVF) to the emulator action; the run log must affirmatively"
+            echo "  show acceleration NOT disabled."
+          } > verify-evidence/host-selection.txt
+          cat verify-evidence/host-selection.txt
 
       - name: Cold-run the sealed artefact on a fresh emulator
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 35
-          arch: x86_64
+          arch: arm64-v8a
           profile: pixel_7_pro
+          emulator-boot-timeout: 1200
           script: APK_PATH=$PWD/artefact/app-release.apk bash tools/verify-cold-run-m8a.sh
 
       - name: Upload M8-A evidence bundle
