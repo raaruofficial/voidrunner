@@ -1,0 +1,74 @@
+name: Verify sealed artefact (M8-A remedial lane)
+
+# One-off remedial lane under JUDGE Amendment 2 (build-lineage keeper pass,
+# 2026-10-27). NOT part of the tag-triggered Android CI. It builds nothing:
+# it downloads the sealed v1.0.2 CI artefact A-1 by id, verifies its sha256
+# byte-for-byte against the sealed hash BEFORE any install, and cold-runs
+# that exact file through the full cold-run enumeration with the hardened
+# script tools/verify-cold-run-m8a.sh. Manual dispatch only, single use.
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  verify-artefact-m8a:
+    name: M8-A cold run of sealed artefact A-1
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      ARTEFACT_ID: "12761853468"
+      EXPECTED_SHA256: "fce0171baad53eed25d86e606ec635810fe38047148fe8e5d53ea7d5dc89cabc"
+    steps:
+      - name: Check out repository (lane files only; the tag tree is untouched)
+        uses: actions/checkout@v4
+
+      - name: Download sealed artefact A-1 by id and verify its hash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p verify-evidence artefact
+          gh api "repos/${{ github.repository }}/actions/artifacts/${ARTEFACT_ID}/zip" > artefact.zip
+          unzip -o artefact.zip -d artefact
+          ls -la artefact
+          ACTUAL="$(sha256sum artefact/app-release.apk | awk '{print $1}')"
+          {
+            echo "artefact_id=${ARTEFACT_ID}"
+            echo "expected_sha256=${EXPECTED_SHA256}"
+            echo "actual_sha256=${ACTUAL}"
+          } > verify-evidence/hash-verification.txt
+          cat verify-evidence/hash-verification.txt
+          if [ "$ACTUAL" != "$EXPECTED_SHA256" ]; then
+            echo "HASH MISMATCH — lane aborts before install (Amendment 2, step 2)"
+            exit 1
+          fi
+          echo "Hash verified byte-for-byte; proceeding to cold run."
+
+      - name: File the instrument (script + its diff vs the tag's script)
+        run: |
+          cp tools/verify-cold-run-m8a.sh verify-evidence/verify-cold-run-m8a.sh
+          git show v1.0.2:tools/verify-cold-run.sh > /tmp/tag-verify-cold-run.sh
+          diff -u /tmp/tag-verify-cold-run.sh tools/verify-cold-run-m8a.sh \
+            > verify-evidence/m8a-diff.txt || true
+          wc -l verify-evidence/m8a-diff.txt
+
+      - name: Cold-run the sealed artefact on a fresh emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          profile: pixel_7_pro
+          script: APK_PATH=$PWD/artefact/app-release.apk bash tools/verify-cold-run-m8a.sh
+
+      - name: Upload M8-A evidence bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-m8a-evidence
+          path: verify-evidence/
+          retention-days: 90
+          if-no-files-found: warn
