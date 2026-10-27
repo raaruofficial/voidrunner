@@ -51,6 +51,13 @@ fun HomeScreen(navController: NavController) {
             letterSpacing = 2.sp,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
+        Spacer(Modifier.height(6.dp))
+        Text(
+            text = "Simulated units in this build — no real money.",
+            fontSize = 12.sp,
+            letterSpacing = 1.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
         Spacer(Modifier.height(40.dp))
 
         MenuButton("▶  PLAY", onClick = { navController.navigate("game") })

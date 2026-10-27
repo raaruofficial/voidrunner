@@ -12,8 +12,8 @@ android {
         applicationId = "com.voidrunner.app"
         minSdk = 28
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0-hackathon"
+        versionCode = 2
+        versionName = "1.0.2"
 
         vectorDrawables { useSupportLibrary = true }
     }
