@@ -40,8 +40,8 @@ class WalletManager {
 
     private val walletAdapter = MobileWalletAdapter(
         connectionIdentity = ConnectionIdentity(
-            identityUri = Uri.parse("https://raaruofficial.github.io/voidrunner/"),
-            iconUri = Uri.parse("https://raaruofficial.github.io/voidrunner/icon-512.png"),
+            identityUri = Uri.parse("https://voidrunner-2hm7p.ondigitalocean.app/"),
+            iconUri = Uri.parse("https://voidrunner-2hm7p.ondigitalocean.app/assets/voidrunner-logo-5bj5j5gp.webp"),
             identityName = "VOIDRUNNER"
         )
     )
