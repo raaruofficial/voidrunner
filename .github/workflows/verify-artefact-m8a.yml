@@ -40,7 +40,7 @@ jobs:
           gh api "repos/${{ github.repository }}/actions/artifacts/${ARTEFACT_ID}/zip" > artefact.zip
           unzip -o artefact.zip -d artefact
           ls -la artefact
-          ACTUAL="$(sha256sum artefact/app-release.apk | awk '{print $1}')"
+          ACTUAL="$( (sha256sum artefact/app-release.apk 2>/dev/null || shasum -a 256 artefact/app-release.apk) | awk '{print $1}')"
           {
             echo "artefact_id=${ARTEFACT_ID}"
             echo "expected_sha256=${EXPECTED_SHA256}"
