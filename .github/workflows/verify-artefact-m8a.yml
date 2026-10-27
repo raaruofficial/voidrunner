@@ -25,6 +25,8 @@ jobs:
     steps:
       - name: Check out repository (lane files only; the tag tree is untouched)
         uses: actions/checkout@v4
+        with:
+          fetch-tags: true
 
       - name: Download sealed artefact A-1 by id and verify its hash
         env:
