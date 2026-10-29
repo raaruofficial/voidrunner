@@ -219,6 +219,29 @@ else
   lock_pin="set (locksettings set-pin issued, PIN $DEVICE_PIN)"
 fi
 log "security: lock_pin=$lock_pin"
+# The PIN lock stays (binding), but the AVD must not lock ITSELF mid-suite:
+# the API-35 trailing run (r4) starved every cell because the keyguard
+# engaged during idle waits and every dump showed the lock screen.
+# Mitigate by construction: screen/lock timeouts to max + stay-on-USB,
+# plus an explicit PIN unlock helper used by the navigation paths.
+adb shell settings put system screen_off_timeout 2147483647 >/dev/null 2>&1 || true
+adb shell settings put secure lock_screen_lock_after_timeout 2147483647 >/dev/null 2>&1 || true
+adb shell svc power stayon usb >/dev/null 2>&1 || true
+log "security: lock mitigation applied (screen_off_timeout=max, lock_after_timeout=max, stayon usb)"
+
+ensure_unlocked() {
+  local f="$TMPD/lock.xml"
+  if dump_ui "$f" && { grep -qE "Swipe up to open|Swipe up to unlock" "$f" || [ "$(fg_pkg)" = "com.android.systemui" ]; }; then
+    log "lock: keyguard appears engaged (fg=$(fg_pkg)); waking + PIN unlock"
+    adb shell input keyevent 82 >/dev/null 2>&1 || true
+    sleep 1
+    adb shell input swipe 540 2000 540 800 250 >/dev/null 2>&1 || true
+    sleep 1
+    adb shell input text "$DEVICE_PIN" >/dev/null 2>&1 || true
+    adb shell input keyevent 66 >/dev/null 2>&1 || true
+    sleep 2
+  fi
+}
 
 enroll_fingerprint() {
   # Best-effort Settings-driven enrollment; every step logged. The
@@ -308,6 +331,7 @@ satisfy_auth_prompt() { # works the biometric/PIN prompt until it clears
 
 authenticate_mock() {
   log "auth: opening mock wallet to Authenticate (15-min window)"
+  ensure_unlocked
   adb shell am start -W -n "$MOCK_ACT" >/dev/null 2>&1 || true
   sleep 3
   local f="$TMPD/mock-main.xml"
@@ -360,6 +384,7 @@ adb logcat -c >/dev/null 2>&1 || true
 # --- VR navigation / flow helpers ---------------------------------------------------
 goto_home() {
   local f="$TMPD/home.xml" i
+  ensure_unlocked
   adb shell am start -W -n "$ACT" >/dev/null 2>&1 || true
   for i in 1 2 3 4 5 6; do
     sleep 2
@@ -367,6 +392,7 @@ goto_home() {
       return 0
     fi
     dismiss_host_anr
+    ensure_unlocked
     adb shell input keyevent 4 >/dev/null 2>&1 || true
   done
   dump_ui "$f" || true
