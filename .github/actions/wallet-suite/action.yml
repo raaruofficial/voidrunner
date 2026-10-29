@@ -1,0 +1,120 @@
+name: VOIDRUNNER v1.0.4 wallet-suite job
+description: >-
+  One cell of the SOLANA RESOURCES BINDING §2.2 wallet verdict: builds the
+  pinned Mock MWA Wallet from source, boots a PIN-locked AVD on the
+  CI-KVM lane, and runs tools/verify-v104-wallet.sh against the sealed,
+  hash-verified v1.0.4 artefact.
+
+inputs:
+  api-level:
+    required: true
+  suite:
+    required: true
+    description: core | errors | lifecycle
+  avd-name:
+    required: true
+  mock-private-key:
+    required: true
+    description: Throwaway devnet-only Ed25519 seed for the mock wallet
+  gh-token:
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Enable KVM group permissions
+      shell: bash
+      run: |
+        echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+        sudo udevadm control --reload-rules
+        sudo udevadm trigger --name-match=kvm
+        ls -la /dev/kvm
+
+    - name: Set up JDK 17 (mock wallet build)
+      uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: "17"
+
+    - name: Download sealed v1.0.4 artefact 12918959892 + hash gate
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.gh-token }}
+        EXPECTED_SHA256: d5bff484280b361febb488dede18eb2d07372698cd1eff56b13edf69560d0f8f
+      run: |
+        set -euo pipefail
+        gh api "repos/raaruofficial/voidrunner/actions/artifacts/12918959892/zip" > /tmp/vr-artefact.zip
+        mkdir -p /tmp/vr-artefact
+        unzip -o /tmp/vr-artefact.zip -d /tmp/vr-artefact
+        cp /tmp/vr-artefact/app-release.apk "$GITHUB_WORKSPACE/voidrunner-sealed.apk"
+        actual="$(sha256sum "$GITHUB_WORKSPACE/voidrunner-sealed.apk" | awk '{print $1}')"
+        echo "sealed APK sha256: $actual"
+        if [ "$actual" != "$EXPECTED_SHA256" ]; then
+          echo "::error::Sealed APK hash mismatch — aborting before any run"
+          exit 1
+        fi
+
+    - name: Clone Mock MWA Wallet at pinned commit
+      shell: bash
+      env:
+        MOCK_COMMIT: d444aff0c72dadd0f5c442ea2bc3559b62916e01
+      run: |
+        set -euo pipefail
+        git clone https://github.com/solana-mobile/mock-mwa-wallet "$GITHUB_WORKSPACE/mock-src"
+        cd "$GITHUB_WORKSPACE/mock-src"
+        git checkout "$MOCK_COMMIT"
+        git rev-parse HEAD
+
+    - name: Gradle cache (mock wallet)
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.gradle/caches
+          ~/.gradle/wrapper
+        key: mock-gradle-d444aff0-${{ runner.os }}
+
+    - name: Configure + build mock wallet (imported throwaway key)
+      shell: bash
+      env:
+        MOCK_PK: ${{ inputs.mock-private-key }}
+      run: |
+        set -euo pipefail
+        cd "$GITHUB_WORKSPACE/mock-src"
+        {
+          printf 'privateKey=%s\n' "$MOCK_PK"
+          printf 'walletName=%s\n' "VRTestWallet"
+          printf 'sdk.dir=%s\n' "$ANDROID_HOME"
+        } > local.properties
+        chmod +x gradlew
+        ./gradlew :app:assembleDebug --console=plain --no-daemon 2>&1 | tail -n 25
+        ls -la app/build/outputs/apk/debug/app-debug.apk
+
+    - name: Run wallet suite on PIN-locked AVD (API ${{ inputs.api-level }})
+      uses: reactivecircus/android-emulator-runner@v2
+      env:
+        FUN001_OUT: fun001-v104-wallet-evidence
+        SUITE: ${{ inputs.suite }}
+        VR_APK: ${{ github.workspace }}/voidrunner-sealed.apk
+        MOCK_APK: ${{ github.workspace }}/mock-src/app/build/outputs/apk/debug/app-debug.apk
+        EXPECTED_PUBKEY: WGSEgS1wRKJspT4hN8Rw947nX936YdhHRbuqftue9mu
+        DEVICE_PIN: "1234"
+      with:
+        api-level: ${{ inputs.api-level }}
+        target: google_apis
+        arch: x86_64
+        profile: pixel_7_pro
+        avd-name: ${{ inputs.avd-name }}
+        force-avd-creation: true
+        emulator-boot-timeout: 1200
+        ram-size: 8192
+        disable-animations: true
+        emulator-options: -gpu swiftshader_indirect -memory 8192 -no-boot-anim -camera-back none -camera-front none
+        script: bash tools/verify-v104-wallet.sh
+
+    - name: Upload wallet-verdict evidence
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: fun001-v104-wallet-${{ inputs.suite }}-api${{ inputs.api-level }}
+        path: fun001-v104-wallet-evidence
+        if-no-files-found: warn

@@ -1,0 +1,90 @@
+name: FUN-001 v1.0.4 wallet verdict (Binding 2.2)
+
+# SOLANA RESOURCES BINDING 2026-10-29 §2.2 recipe, run against the SEALED
+# cured v1.0.4 artefact (Android CI 40926367830, artefact 12918959892,
+# sha256 d5bff484...f8f, hash-gated in every job). Mock MWA Wallet at
+# pinned commit d444aff0, imported THROWAWAY key (repo secret
+# MOCK_WALLET_PRIVATE_KEY — devnet/localnet test identity only, never an
+# estate key), PIN-locked AVDs (PIN 1234 + emulator fingerprint enrolment
+# attempted and recorded by the driver).
+#
+# Suites: core (VR-1/2/3/6/9) · errors (VR-7/8/13) · lifecycle (VR-11/12).
+# API 36 is the primary AVD per §2.2; API 35 runs the core suite as the
+# trailing AVD. Each suite is its own job/runner so one stuck emulator
+# step cannot starve the others.
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Which jobs to run
+        type: choice
+        options:
+          - core-api36
+          - all
+        default: core-api36
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  wallet-core-api36:
+    name: wallet suite CORE — API 36 (VR-1/2/3/6/9)
+    if: ${{ inputs.target == 'core-api36' || inputs.target == 'all' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/wallet-suite
+        with:
+          api-level: "36"
+          suite: core
+          avd-name: vr36-core
+          mock-private-key: ${{ secrets.MOCK_WALLET_PRIVATE_KEY }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+
+  wallet-errors-api36:
+    name: wallet suite ERRORS — API 36 (VR-7/8/13)
+    if: ${{ inputs.target == 'all' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/wallet-suite
+        with:
+          api-level: "36"
+          suite: errors
+          avd-name: vr36-errors
+          mock-private-key: ${{ secrets.MOCK_WALLET_PRIVATE_KEY }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+
+  wallet-lifecycle-api36:
+    name: wallet suite LIFECYCLE — API 36 (VR-11/12)
+    if: ${{ inputs.target == 'all' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/wallet-suite
+        with:
+          api-level: "36"
+          suite: lifecycle
+          avd-name: vr36-lifecycle
+          mock-private-key: ${{ secrets.MOCK_WALLET_PRIVATE_KEY }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+
+  wallet-core-api35:
+    name: wallet suite CORE — API 35 trailing (VR-1/2/3/6/9)
+    if: ${{ inputs.target == 'all' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/wallet-suite
+        with:
+          api-level: "35"
+          suite: core
+          avd-name: vr35-core
+          mock-private-key: ${{ secrets.MOCK_WALLET_PRIVATE_KEY }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}

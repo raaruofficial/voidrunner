@@ -110,8 +110,9 @@ print(m.group(1) if m else "")
 PY
 )"
       log "anr: dialog title at checkpoint $tag: '$anr_title'"
-      if [ "$anr_title" = "System UI isn’t responding" ] || [ "$anr_title" = "System UI isn't responding" ]; then
-        log "anr: host System UI dialog; dismissing via Wait"
+      if [ "$anr_title" = "System UI isn’t responding" ] || [ "$anr_title" = "System UI isn't responding" ] \
+        || [ "$anr_title" = "Pixel Launcher isn’t responding" ] || [ "$anr_title" = "Pixel Launcher isn't responding" ]; then
+        log "anr: host dialog ('$anr_title' — emulator image component, not $PKG); dismissing via Wait"
         tap_text "$f" "Wait" || tap_frac 0.66 0.54
         sleep 3
       else
@@ -283,7 +284,14 @@ fi
 
 # === Phase C — WebView provider disabled =======================================
 if [ "${PHASES#*C}" != "$PHASES" ] && [ "$install_v" = "ok" ]; then
-  wv_pkg="$(adb shell pm list packages 2>/dev/null | tr -d '\r' | sed -n 's/^package://p' | grep -i webview | head -n 1)"
+  # Target the ACTUAL WebView provider package (from dumpsys), never a
+  # webview-named overlay: the v1.0.4 battery's first Phase C attempt
+  # disabled com.google.android.overlay.googlewebview and the real
+  # provider (com.google.android.webview) stayed active throughout.
+  wv_pkg="$(adb shell dumpsys webviewupdate 2>/dev/null | sed -n 's/.*Current WebView package (name, version): (\([^,]*\),.*/\1/p' | head -n 1 | tr -d '\r')"
+  if [ -z "$wv_pkg" ]; then
+    wv_pkg="$(adb shell pm list packages 2>/dev/null | tr -d '\r' | sed -n 's/^package://p' | grep -x "com.google.android.webview" | head -n 1)"
+  fi
   {
     echo "webview_packages:"
     adb shell pm list packages 2>/dev/null | tr -d '\r' | grep -i webview || true
@@ -304,7 +312,9 @@ if [ "${PHASES#*C}" != "$PHASES" ] && [ "$install_v" = "ok" ]; then
       adb shell dumpsys webviewupdate 2>/dev/null | head -n 20 || true
       adb shell pm list packages -d 2>/dev/null | tr -d '\r' | grep -i webview || true
     } > "$OUT/webview-provider-after-disable.txt"
-    if adb shell pm list packages -d 2>/dev/null | tr -d '\r' | grep -q "$wv_pkg"; then
+    cur_after="$(adb shell dumpsys webviewupdate 2>/dev/null | sed -n 's/.*Current WebView package (name, version): (\([^,]*\),.*/\1/p' | head -n 1 | tr -d '\r')"
+    log "phaseC: current provider after disable attempts = '$cur_after' (target was '$wv_pkg')"
+    if adb shell pm list packages -d 2>/dev/null | tr -d '\r' | grep -q "$wv_pkg" && [ "$cur_after" != "$wv_pkg" ]; then
       disabled_ok="1"
     fi
   fi
