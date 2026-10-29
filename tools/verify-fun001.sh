@@ -347,14 +347,19 @@ if [ "${PHASES#*C}" != "$PHASES" ] && [ "$install_v" = "ok" ]; then
       adb shell dumpsys webviewupdate 2>/dev/null | head -n 20 || true
       adb shell pm list packages -d 2>/dev/null | tr -d '\r' | grep -i webview || true
     } > "$OUT/webview-provider-after-disable.txt"
-    cur_after="$(adb shell dumpsys webviewupdate 2>/dev/null | sed -n 's/.*Current WebView package (name, version): (\([^,]*\),.*/\1/p' | head -n 1 | tr -d '\r')"
+    wv_dump_after="$(adb shell dumpsys webviewupdate 2>/dev/null)"
+    cur_after="$(printf '%s' "$wv_dump_after" | sed -n 's/.*Current WebView package (name, version): (\([^,]*\),.*/\1/p' | head -n 1 | tr -d '\r')"
     log "phaseC: current provider after disable attempts = '$cur_after' (target was '$wv_pkg')"
-    # The operative fact is the WebViewUpdateService's current provider:
-    # if it no longer names the target package, apps on this device have
-    # no valid WebView provider (the KFC-003 test condition), whichever
-    # rung of the ladder (disable-user / hide / uninstall-for-user) got
-    # us there.
+    # Removal is verified by EITHER signal (r3 evidence, 2026-10-29):
+    # after `pm uninstall --user 0` succeeded, the service's header kept
+    # NAMING the package as 'current' (stale last-known state) while its
+    # own validity line flipped to 'is NOT installed/enabled for all
+    # users' — the validity line is the operative fact. Accept either.
     if [ -n "$wv_pkg" ] && [ "$cur_after" != "$wv_pkg" ]; then
+      disabled_ok="1"
+    fi
+    if printf '%s' "$wv_dump_after" | grep "Valid package $wv_pkg" | grep -q "NOT installed/enabled"; then
+      log "phaseC: dumpsys validity line confirms $wv_pkg is NOT installed/enabled for all users"
       disabled_ok="1"
     fi
   fi
