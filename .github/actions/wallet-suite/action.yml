@@ -30,6 +30,18 @@ runs:
         sudo udevadm trigger --name-match=kvm
         ls -la /dev/kvm
 
+    - name: Install emulator runtime libraries
+      shell: bash
+      run: |
+        # Emulator 37.2.13's qemu links libpulse.so.0, which some
+        # ubuntu-latest draws lack — the process dies at load and the
+        # action then burns its whole boot timeout polling adb for a
+        # device that will never exist (wallet-core r1 + battery-lowram
+        # r2, 2026-10-29, same verbatim load error). Install up front.
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq libpulse0 libgl1 libegl1 libnss3 > /dev/null
+        ldconfig -p | grep -c libpulse || true
+
     - name: Set up JDK 17 (mock wallet build)
       uses: actions/setup-java@v4
       with:
