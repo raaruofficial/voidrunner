@@ -132,7 +132,7 @@ jobs:
       - name: Install emulator runtime libraries
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq libpulse0 libgl1 libegl1 libnss3 > /dev/null
+          sudo apt-get install -y -qq libpulse0 libgl1 libegl1 libnss3 libxcb-cursor0 > /dev/null
 
       - name: Enable KVM group permissions
         run: |
@@ -172,6 +172,7 @@ jobs:
           avd-name: v104-webview
           force-avd-creation: true
           emulator-boot-timeout: 1200
+          emulator-options: -no-window
           script: APK_PATH=$PWD/artefact/app-release.apk FUN001_OUT=$PWD/fun001-v104-battery-webview FUN001_PHASES=AC FUN001_VERSION_STAMP='${{ env.VERSION_STAMP }}' bash tools/verify-fun001.sh
 
       - name: Upload battery-webview evidence
@@ -195,7 +196,7 @@ jobs:
       - name: Install emulator runtime libraries
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq libpulse0 libgl1 libegl1 libnss3 > /dev/null
+          sudo apt-get install -y -qq libpulse0 libgl1 libegl1 libnss3 libxcb-cursor0 > /dev/null
 
       - name: Enable KVM group permissions
         run: |
@@ -236,7 +237,7 @@ jobs:
           force-avd-creation: true
           emulator-boot-timeout: 1200
           ram-size: 1024
-          emulator-options: -memory 1024
+          emulator-options: -no-window -memory 1024
           script: APK_PATH=$PWD/artefact/app-release.apk FUN001_OUT=$PWD/fun001-v104-battery-lowram FUN001_PHASES=AB FUN001_VERSION_STAMP='${{ env.VERSION_STAMP }}' bash tools/verify-fun001.sh
 
       - name: Upload battery-lowram evidence

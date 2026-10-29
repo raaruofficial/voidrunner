@@ -39,7 +39,7 @@ runs:
         # device that will never exist (wallet-core r1 + battery-lowram
         # r2, 2026-10-29, same verbatim load error). Install up front.
         sudo apt-get update -qq
-        sudo apt-get install -y -qq libpulse0 libgl1 libegl1 libnss3 > /dev/null
+        sudo apt-get install -y -qq libpulse0 libgl1 libegl1 libnss3 libxcb-cursor0 > /dev/null
         ldconfig -p | grep -c libpulse || true
 
     - name: Set up JDK 17 (mock wallet build)
@@ -120,7 +120,7 @@ runs:
         emulator-boot-timeout: 1200
         ram-size: 8192
         disable-animations: true
-        emulator-options: -gpu swiftshader_indirect -memory 8192 -no-boot-anim -camera-back none -camera-front none
+        emulator-options: -no-window -gpu swiftshader_indirect -memory 8192 -no-boot-anim -camera-back none -camera-front none
         script: bash tools/verify-v104-wallet.sh
 
     - name: Upload wallet-verdict evidence
