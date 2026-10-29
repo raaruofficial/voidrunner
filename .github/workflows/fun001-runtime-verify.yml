@@ -1,28 +1,52 @@
-name: FUN-001 runtime verify (cured v1.0.4) — standard battery legs
+name: FUN-001 runtime verify (cured v1.0.4)
 
-# The no-wallet launch/sweep/connect-tap matrix from the original v1.0.4
-# brief ran 2026-10-29 (run 40953755735: kill cell PASS, API 28 span
-# PASS; sweep/low-RAM script-FAILs traced to a Pixel Launcher host ANR
-# dialog in 3 of 5 parallel jobs — host wedge, app signals clean) and is
-# now SUBSUMED by the §2.2 wallet verdict in fun001-v104-wallet.yml
-# (VR-1/VR-11). What remains here are the two standard-battery legs the
-# binding keeps separate from the wallet verdict:
-#   battery-webview — Phase C (KFC-003): WebView provider verifiably
-#     disabled -> launch + PLAY. First attempt disabled the wrong package
-#     (an overlay) and the leg was void; the script now targets the real
-#     provider from dumpsys and verifies it is no longer current before
-#     launching.
-#   battery-lowram — 1024 MB cell: launch + sweep. The ram-size input
-#     alone did not take on the first attempt (AVD still booted at
-#     ~4 GB), so -memory 1024 is passed explicitly and the device-info
-#     meminfo in the evidence records what actually ran.
+# v1.0.4 verification lane. Two families, one dispatchable file (a
+# workflow_dispatch file must exist on the DEFAULT branch to run at
+# all; new workflow files on a side branch return 404 — so both
+# families live here and are selected with the `target` input; runs
+# execute this file's definition from the dispatched ref):
 #
-# Both jobs run tools/verify-fun001.sh against the same sealed artefact
-# (Android CI 40926367830, artefact 12918959892) with the in-step hash
-# gate. Jobs are separate runners by design.
+# WALLET VERDICT — SOLANA RESOURCES BINDING 2026-10-29 §2.2 recipe
+# against the sealed cured binary + Mock MWA Wallet (pinned commit
+# d444aff0, imported THROWAWAY key in repo secret
+# MOCK_WALLET_PRIVATE_KEY — devnet/localnet test identity only, never
+# an estate key) on PIN-locked AVDs. Suites via
+# ./.github/actions/wallet-suite + tools/verify-v104-wallet.sh:
+#   core (VR-1/2/3/6/9) · errors (VR-7/8/13) · lifecycle (VR-11/12).
+#   API 36 primary, API 35 trailing (core suite).
+#
+# STANDARD BATTERY legs (binding keeps them separate from the wallet
+# verdict), via tools/verify-fun001.sh:
+#   battery-webview — Phase C (KFC-003): WebView provider verifiably
+#     disabled -> launch + PLAY (first attempt disabled the wrong
+#     package — an overlay — and was void; the script now targets the
+#     real provider from dumpsys and verifies it is no longer current).
+#   battery-lowram — 1024 MB cell: launch + sweep (the ram-size input
+#     alone did not take on the first attempt — AVD booted at ~4 GB —
+#     so -memory 1024 is passed explicitly and device-info meminfo
+#     records what actually ran).
+#
+# The original brief's no-wallet launch/sweep/connect-tap matrix ran
+# 2026-10-29 (run 40953755735: kill cell PASS, API 28 span PASS; the
+# API 35 sweep script-FAIL was a Pixel Launcher host ANR artifact —
+# app signals clean) and is SUBSUMED by VR-1/VR-11; it is not re-run.
+#
+# Every job is its own runner (the v1.0.3 combined matrix starved).
+# Every job hash-gates the sealed artefact (Android CI 40926367830,
+# artefact 12918959892, sha256 d5bff484...f8f) before any install.
 
 on:
   workflow_dispatch:
+    inputs:
+      target:
+        description: Which job family to run
+        type: choice
+        options:
+          - wallet-core-api36
+          - wallet-all
+          - battery
+          - everything
+        default: wallet-core-api36
 
 permissions:
   contents: read
@@ -34,8 +58,71 @@ env:
   VERSION_STAMP: "v1.0.4 (4)"
 
 jobs:
+  # ---------------------------------------------------------------- wallet
+  wallet-core-api36:
+    name: wallet suite CORE — API 36 (VR-1/2/3/6/9)
+    if: ${{ inputs.target == 'wallet-core-api36' || inputs.target == 'wallet-all' || inputs.target == 'everything' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/wallet-suite
+        with:
+          api-level: "36"
+          suite: core
+          avd-name: vr36-core
+          mock-private-key: ${{ secrets.MOCK_WALLET_PRIVATE_KEY }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+
+  wallet-errors-api36:
+    name: wallet suite ERRORS — API 36 (VR-7/8/13)
+    if: ${{ inputs.target == 'wallet-all' || inputs.target == 'everything' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/wallet-suite
+        with:
+          api-level: "36"
+          suite: errors
+          avd-name: vr36-errors
+          mock-private-key: ${{ secrets.MOCK_WALLET_PRIVATE_KEY }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+
+  wallet-lifecycle-api36:
+    name: wallet suite LIFECYCLE — API 36 (VR-11/12)
+    if: ${{ inputs.target == 'wallet-all' || inputs.target == 'everything' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/wallet-suite
+        with:
+          api-level: "36"
+          suite: lifecycle
+          avd-name: vr36-lifecycle
+          mock-private-key: ${{ secrets.MOCK_WALLET_PRIVATE_KEY }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+
+  wallet-core-api35:
+    name: wallet suite CORE — API 35 trailing (VR-1/2/3/6/9)
+    if: ${{ inputs.target == 'wallet-all' || inputs.target == 'everything' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/wallet-suite
+        with:
+          api-level: "35"
+          suite: core
+          avd-name: vr35-core
+          mock-private-key: ${{ secrets.MOCK_WALLET_PRIVATE_KEY }}
+          gh-token: ${{ secrets.GITHUB_TOKEN }}
+
+  # ---------------------------------------------------------------- battery
   battery-webview:
     name: battery — Phase C WebView-disabled (API 35)
+    if: ${{ inputs.target == 'battery' || inputs.target == 'everything' }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -93,6 +180,7 @@ jobs:
 
   battery-lowram:
     name: battery — low RAM 1024 MB (API 35)
+    if: ${{ inputs.target == 'battery' || inputs.target == 'everything' }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
