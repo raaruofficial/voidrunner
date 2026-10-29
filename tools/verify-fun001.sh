@@ -275,7 +275,7 @@ if [ "${PHASES#*B}" != "$PHASES" ] && [ "$install_v" = "ok" ]; then
   play_v="$(cat "$TMPD/verdict-play.txt" 2>/dev/null || echo FAIL)"
   sweep_one wallet "WALLET" "CONNECT WALLET" 0.55 5
   wallet_v="$(cat "$TMPD/verdict-wallet.txt" 2>/dev/null || echo FAIL)"
-  sweep_one settings "SETTINGS" "v1.0.3 (3)" 0.625 5
+  sweep_one settings "SETTINGS" "${FUN001_VERSION_STAMP:-v1.0.3 (3)}" 0.625 5
   settings_v="$(cat "$TMPD/verdict-settings.txt" 2>/dev/null || echo FAIL)"
   adb logcat -d > "$OUT/logcat-phaseB-final.txt" 2>&1 || true
   count_app_crashes "$OUT/logcat-phaseB-final.txt"

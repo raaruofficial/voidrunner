@@ -1,56 +1,71 @@
-name: FUN-001 runtime verification (sealed v1.0.3)
+name: FUN-001 runtime verification (cured v1.0.4)
 
-# One-off runtime-verification lane (estate directive, 2026-10-29).
-# Builds nothing: downloads the sealed v1.0.3 CI release artefact by id,
-# verifies its sha256 byte-for-byte BEFORE any install, then cold-runs
-# that exact file through tools/verify-fun001.sh (fresh install, first
-# launch, full menu sweep, WebView-provider-disabled variant; API span
-# and low-RAM cells as separate emulator runs). Manual dispatch only.
-# Host history: v1 of this lane ran on macos-14 arm64 — all four emulator
-# steps died with "HVF error: HV_UNSUPPORTED" / "failed to initialize HVF"
-# and boot timeouts (runs 40922499943, 40924795486, 2026-10-29); the script
-# never executed. v2 runs on ubuntu-latest with x86_64 images and KVM
-# (udev permission step below — its absence is what killed this repo's
-# earlier ubuntu attempt in the M8-A lineage). The sealed APK ships
-# x86_64 native libs, so it runs natively on this route.
+# Runtime-verification lane for the CURED VOIDRUNNER binary v1.0.4
+# (estate directive follow-on, 2026-10-29). Builds nothing: downloads
+# the v1.0.4 signed release artefact by id, verifies its sha256
+# byte-for-byte BEFORE any install, then cold-runs that exact file
+# through tools/verify-fun001.sh.
+#
+# The v1.0.3 verdict (REPORT.md, hidden_files/fun001-runtime-check-
+# 2026-10-29) runtime-PROVED the KFC-001 crash on the CONNECT WALLET
+# tap (API 35, run 40929851421). This lane runs the same instrument
+# against the cured binary: the single ActivityResultSender is now
+# constructed in MainActivity.onCreate (commit 47e2e29).
+#
+# Structure lesson from v1.0.3: the combined-matrix job (run
+# 40929843690) starved — one stuck emulator step ate the whole job
+# window and the API-35 sweep / Phase C / low-RAM cells never ran.
+# Here EVERY cell is its own job (own runner, own emulator, own
+# timeout), gated by its own dispatch input, so no cell can starve
+# another.
+#
+# Host route: ubuntu-latest + KVM + x86_64 google_apis images
+# (proven by the v1.0.3 v2 lane; macos-14 HVF route is dead).
 
 on:
   workflow_dispatch:
     inputs:
-      span_api_level:
-        description: "Low-end API level for the span job (app minSdk is 28)"
-        required: true
-        default: "28"
-      run_main_matrix:
-        description: "Run the API 35 + API span matrix jobs"
+      run_kill_cell:
+        description: "Cell 1 — API 35 kill cell (A+W: CONNECT WALLET tap)"
         type: boolean
         required: true
         default: true
-      run_wallet_interaction:
-        description: "Run the wallet-interaction job (Phase A+W: CONNECT WALLET tap)"
+      run_span_api28:
+        description: "Cell 2 — API 28 connect tap + full sweep (A+B+W)"
         type: boolean
         required: true
-        default: false
-      run_game_bridge:
-        description: "Run the game-bridge job (Phase A+G: in-game wallet action via WebView bridge)"
+        default: true
+      run_sweep_api35:
+        description: "Cell 3 — API 35 full menu sweep (A+B)"
         type: boolean
         required: true
-        default: false
+        default: true
+      run_webview_api35:
+        description: "Cell 4 — API 35 WebView provider disabled (A+C)"
+        type: boolean
+        required: true
+        default: true
+      run_lowram_api35:
+        description: "Cell 5 — API 35 low-RAM 1024 MB (A+B)"
+        type: boolean
+        required: true
+        default: true
 
 permissions:
   contents: read
   actions: read
 
 env:
-  ARTEFACT_ID: "12777961763"
-  EXPECTED_SHA256: "6e422d6ea2b3349c4c49119ad1dc46b175c06070bedebba3939e636505714159"
+  ARTEFACT_ID: "12918959892"
+  EXPECTED_SHA256: "d5bff484280b361febb488dede18eb2d07372698cd1eff56b13edf69560d0f8f"
+  VERSION_STAMP: "v1.0.4 (4)"
 
 jobs:
-  api-current:
-    name: API 35 — full matrix (A+B+C) + low-RAM (A+B)
-    if: ${{ inputs.run_main_matrix }}
+  kill-api35:
+    name: Cell 1 — API 35 kill cell (A+W, CONNECT WALLET tap)
+    if: ${{ inputs.run_kill_cell }}
     runs-on: ubuntu-latest
-    timeout-minutes: 150
+    timeout-minutes: 90
     steps:
       - name: Check out repository (lane files only)
         uses: actions/checkout@v4
@@ -62,12 +77,12 @@ jobs:
           sudo udevadm trigger --name-match=kvm
           ls -la /dev/kvm
 
-      - name: Download sealed artefact by id and verify its hash
+      - name: Download v1.0.4 artefact by id and verify its hash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          mkdir -p artefact fun001-evidence-api35 fun001-evidence-lowram
+          mkdir -p artefact fun001-v104-evidence-kill
           gh api "repos/${{ github.repository }}/actions/artifacts/${ARTEFACT_ID}/zip" > artefact.zip
           unzip -o artefact.zip -d artefact
           ls -la artefact
@@ -76,54 +91,37 @@ jobs:
             echo "artefact_id=${ARTEFACT_ID}"
             echo "expected_sha256=${EXPECTED_SHA256}"
             echo "actual_sha256=${ACTUAL}"
-          } | tee fun001-evidence-api35/hash-verification.txt
-          cp fun001-evidence-api35/hash-verification.txt fun001-evidence-lowram/hash-verification.txt
+          } | tee fun001-v104-evidence-kill/hash-verification.txt
           if [ "$ACTUAL" != "$EXPECTED_SHA256" ]; then
             echo "HASH MISMATCH — lane aborts before install"
             exit 1
           fi
-          echo "Hash verified byte-for-byte; proceeding to cold runs."
+          echo "Hash verified byte-for-byte; proceeding to cold run."
 
-      - name: Full matrix on API 35 (fresh install, launch, sweep, WebView-disabled)
+      - name: Kill cell on API 35 (fresh install, launch, WALLET, CONNECT WALLET tap)
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 35
           target: google_apis
           arch: x86_64
           profile: pixel_7_pro
-          avd-name: fun001-main
+          avd-name: fun001-v104-kill
           force-avd-creation: true
           emulator-boot-timeout: 1200
-          script: APK_PATH=$PWD/artefact/app-release.apk FUN001_OUT=$PWD/fun001-evidence-api35 FUN001_PHASES=ABC bash tools/verify-fun001.sh
+          script: APK_PATH=$PWD/artefact/app-release.apk FUN001_OUT=$PWD/fun001-v104-evidence-kill FUN001_PHASES=AW FUN001_VERSION_STAMP='${{ env.VERSION_STAMP }}' bash tools/verify-fun001.sh
 
-      - name: Low-RAM run on API 35 (1024 MB, phases A+B)
-        if: always()
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: 35
-          target: google_apis
-          arch: x86_64
-          profile: pixel_7_pro
-          avd-name: fun001-lowram
-          force-avd-creation: true
-          ram-size: 1024
-          emulator-boot-timeout: 1200
-          script: APK_PATH=$PWD/artefact/app-release.apk FUN001_OUT=$PWD/fun001-evidence-lowram FUN001_PHASES=AB bash tools/verify-fun001.sh
-
-      - name: Upload API 35 evidence
+      - name: Upload kill-cell evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: fun001-evidence-api35
-          path: |
-            fun001-evidence-api35/
-            fun001-evidence-lowram/
+          name: fun001-v104-evidence-kill
+          path: fun001-v104-evidence-kill/
           retention-days: 90
           if-no-files-found: warn
 
-  api-span:
-    name: API span (low end) — phases A+B
-    if: ${{ inputs.run_main_matrix }}
+  span-api28:
+    name: Cell 2 — API 28 connect tap + full sweep (A+B+W)
+    if: ${{ inputs.run_span_api28 }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -137,12 +135,12 @@ jobs:
           sudo udevadm trigger --name-match=kvm
           ls -la /dev/kvm
 
-      - name: Download sealed artefact by id and verify its hash
+      - name: Download v1.0.4 artefact by id and verify its hash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          mkdir -p artefact fun001-evidence-span
+          mkdir -p artefact fun001-v104-evidence-span28
           gh api "repos/${{ github.repository }}/actions/artifacts/${ARTEFACT_ID}/zip" > artefact.zip
           unzip -o artefact.zip -d artefact
           ls -la artefact
@@ -151,37 +149,37 @@ jobs:
             echo "artefact_id=${ARTEFACT_ID}"
             echo "expected_sha256=${EXPECTED_SHA256}"
             echo "actual_sha256=${ACTUAL}"
-          } | tee fun001-evidence-span/hash-verification.txt
+          } | tee fun001-v104-evidence-span28/hash-verification.txt
           if [ "$ACTUAL" != "$EXPECTED_SHA256" ]; then
             echo "HASH MISMATCH — lane aborts before install"
             exit 1
           fi
           echo "Hash verified byte-for-byte; proceeding to cold run."
 
-      - name: Span run (phases A+B)
+      - name: Span run on API 28 (phases A+B+W)
         uses: reactivecircus/android-emulator-runner@v2
         with:
-          api-level: ${{ inputs.span_api_level }}
+          api-level: 28
           target: google_apis
           arch: x86_64
           profile: pixel_7_pro
-          avd-name: fun001-span
+          avd-name: fun001-v104-span28
           force-avd-creation: true
           emulator-boot-timeout: 1200
-          script: APK_PATH=$PWD/artefact/app-release.apk FUN001_OUT=$PWD/fun001-evidence-span FUN001_PHASES=AB bash tools/verify-fun001.sh
+          script: APK_PATH=$PWD/artefact/app-release.apk FUN001_OUT=$PWD/fun001-v104-evidence-span28 FUN001_PHASES=ABW FUN001_VERSION_STAMP='${{ env.VERSION_STAMP }}' bash tools/verify-fun001.sh
 
       - name: Upload span evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: fun001-evidence-span
-          path: fun001-evidence-span/
+          name: fun001-v104-evidence-span28
+          path: fun001-v104-evidence-span28/
           retention-days: 90
           if-no-files-found: warn
 
-  wallet-interaction:
-    name: API 35 — wallet interaction (A+W, CONNECT WALLET tap)
-    if: ${{ inputs.run_wallet_interaction }}
+  sweep-api35:
+    name: Cell 3 — API 35 full menu sweep (A+B)
+    if: ${{ inputs.run_sweep_api35 }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -195,12 +193,12 @@ jobs:
           sudo udevadm trigger --name-match=kvm
           ls -la /dev/kvm
 
-      - name: Download sealed artefact by id and verify its hash
+      - name: Download v1.0.4 artefact by id and verify its hash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          mkdir -p artefact fun001-evidence-wallet
+          mkdir -p artefact fun001-v104-evidence-sweep35
           gh api "repos/${{ github.repository }}/actions/artifacts/${ARTEFACT_ID}/zip" > artefact.zip
           unzip -o artefact.zip -d artefact
           ls -la artefact
@@ -209,37 +207,37 @@ jobs:
             echo "artefact_id=${ARTEFACT_ID}"
             echo "expected_sha256=${EXPECTED_SHA256}"
             echo "actual_sha256=${ACTUAL}"
-          } | tee fun001-evidence-wallet/hash-verification.txt
+          } | tee fun001-v104-evidence-sweep35/hash-verification.txt
           if [ "$ACTUAL" != "$EXPECTED_SHA256" ]; then
             echo "HASH MISMATCH — lane aborts before install"
             exit 1
           fi
           echo "Hash verified byte-for-byte; proceeding to cold run."
 
-      - name: Wallet interaction run (phases A+W)
+      - name: Sweep run on API 35 (phases A+B)
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 35
           target: google_apis
           arch: x86_64
           profile: pixel_7_pro
-          avd-name: fun001-wallet
+          avd-name: fun001-v104-sweep35
           force-avd-creation: true
           emulator-boot-timeout: 1200
-          script: APK_PATH=$PWD/artefact/app-release.apk FUN001_OUT=$PWD/fun001-evidence-wallet FUN001_PHASES=AW bash tools/verify-fun001.sh
+          script: APK_PATH=$PWD/artefact/app-release.apk FUN001_OUT=$PWD/fun001-v104-evidence-sweep35 FUN001_PHASES=AB FUN001_VERSION_STAMP='${{ env.VERSION_STAMP }}' bash tools/verify-fun001.sh
 
-      - name: Upload wallet-interaction evidence
+      - name: Upload sweep evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: fun001-evidence-wallet
-          path: fun001-evidence-wallet/
+          name: fun001-v104-evidence-sweep35
+          path: fun001-v104-evidence-sweep35/
           retention-days: 90
           if-no-files-found: warn
 
-  game-bridge:
-    name: API 35 — game bridge (A+G, in-game wallet action)
-    if: ${{ inputs.run_game_bridge }}
+  webview-api35:
+    name: Cell 4 — API 35 WebView provider disabled (A+C)
+    if: ${{ inputs.run_webview_api35 }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -253,12 +251,12 @@ jobs:
           sudo udevadm trigger --name-match=kvm
           ls -la /dev/kvm
 
-      - name: Download sealed artefact by id and verify its hash
+      - name: Download v1.0.4 artefact by id and verify its hash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          mkdir -p artefact fun001-evidence-gamebridge
+          mkdir -p artefact fun001-v104-evidence-webview
           gh api "repos/${{ github.repository }}/actions/artifacts/${ARTEFACT_ID}/zip" > artefact.zip
           unzip -o artefact.zip -d artefact
           ls -la artefact
@@ -267,30 +265,89 @@ jobs:
             echo "artefact_id=${ARTEFACT_ID}"
             echo "expected_sha256=${EXPECTED_SHA256}"
             echo "actual_sha256=${ACTUAL}"
-          } | tee fun001-evidence-gamebridge/hash-verification.txt
+          } | tee fun001-v104-evidence-webview/hash-verification.txt
           if [ "$ACTUAL" != "$EXPECTED_SHA256" ]; then
             echo "HASH MISMATCH — lane aborts before install"
             exit 1
           fi
           echo "Hash verified byte-for-byte; proceeding to cold run."
 
-      - name: Game-bridge run (phases A+G)
+      - name: WebView-disabled run on API 35 (phases A+C)
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 35
           target: google_apis
           arch: x86_64
           profile: pixel_7_pro
-          avd-name: fun001-gamebridge
+          avd-name: fun001-v104-webview
           force-avd-creation: true
           emulator-boot-timeout: 1200
-          script: APK_PATH=$PWD/artefact/app-release.apk FUN001_OUT=$PWD/fun001-evidence-gamebridge FUN001_PHASES=AG bash tools/verify-fun001.sh
+          script: APK_PATH=$PWD/artefact/app-release.apk FUN001_OUT=$PWD/fun001-v104-evidence-webview FUN001_PHASES=AC FUN001_VERSION_STAMP='${{ env.VERSION_STAMP }}' bash tools/verify-fun001.sh
 
-      - name: Upload game-bridge evidence
+      - name: Upload WebView-disabled evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: fun001-evidence-gamebridge
-          path: fun001-evidence-gamebridge/
+          name: fun001-v104-evidence-webview
+          path: fun001-v104-evidence-webview/
+          retention-days: 90
+          if-no-files-found: warn
+
+  lowram-api35:
+    name: Cell 5 — API 35 low-RAM 1024 MB (A+B)
+    if: ${{ inputs.run_lowram_api35 }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Check out repository (lane files only)
+        uses: actions/checkout@v4
+
+      - name: Enable KVM group permissions
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -la /dev/kvm
+
+      - name: Download v1.0.4 artefact by id and verify its hash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p artefact fun001-v104-evidence-lowram
+          gh api "repos/${{ github.repository }}/actions/artifacts/${ARTEFACT_ID}/zip" > artefact.zip
+          unzip -o artefact.zip -d artefact
+          ls -la artefact
+          ACTUAL="$( (sha256sum artefact/app-release.apk 2>/dev/null || shasum -a 256 artefact/app-release.apk) | awk '{print $1}')"
+          {
+            echo "artefact_id=${ARTEFACT_ID}"
+            echo "expected_sha256=${EXPECTED_SHA256}"
+            echo "actual_sha256=${ACTUAL}"
+          } | tee fun001-v104-evidence-lowram/hash-verification.txt
+          if [ "$ACTUAL" != "$EXPECTED_SHA256" ]; then
+            echo "HASH MISMATCH — lane aborts before install"
+            exit 1
+          fi
+          echo "Hash verified byte-for-byte; proceeding to cold run."
+
+      - name: Low-RAM run on API 35 (1024 MB, phases A+B)
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_7_pro
+          avd-name: fun001-v104-lowram
+          force-avd-creation: true
+          ram-size: 1024
+          emulator-boot-timeout: 1200
+          script: APK_PATH=$PWD/artefact/app-release.apk FUN001_OUT=$PWD/fun001-v104-evidence-lowram FUN001_PHASES=AB FUN001_VERSION_STAMP='${{ env.VERSION_STAMP }}' bash tools/verify-fun001.sh
+
+      - name: Upload low-RAM evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fun001-v104-evidence-lowram
+          path: fun001-v104-evidence-lowram/
           retention-days: 90
           if-no-files-found: warn
