@@ -1,0 +1,141 @@
+name: FUN-001 runtime verification (sealed v1.0.3)
+
+# One-off runtime-verification lane (estate directive, 2026-10-29).
+# Builds nothing: downloads the sealed v1.0.3 CI release artefact by id,
+# verifies its sha256 byte-for-byte BEFORE any install, then cold-runs
+# that exact file through tools/verify-fun001.sh (fresh install, first
+# launch, full menu sweep, WebView-provider-disabled variant; API span
+# and low-RAM cells as separate emulator runs). Manual dispatch only.
+# Host: macos-14 arm64 (HVF) — the ubuntu software-emulation route is a
+# proven host-wedge class in this repo's history (see M8-A lane notes).
+
+on:
+  workflow_dispatch:
+    inputs:
+      span_api_level:
+        description: "Low-end API level for the span job (app minSdk is 28)"
+        required: true
+        default: "28"
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  ARTEFACT_ID: "12777961763"
+  EXPECTED_SHA256: "6e422d6ea2b3349c4c49119ad1dc46b175c06070bedebba3939e636505714159"
+
+jobs:
+  api-current:
+    name: API 35 — full matrix (A+B+C) + low-RAM (A+B)
+    runs-on: macos-14
+    timeout-minutes: 150
+    steps:
+      - name: Check out repository (lane files only)
+        uses: actions/checkout@v4
+
+      - name: Download sealed artefact by id and verify its hash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p artefact fun001-evidence-api35 fun001-evidence-lowram
+          gh api "repos/${{ github.repository }}/actions/artifacts/${ARTEFACT_ID}/zip" > artefact.zip
+          unzip -o artefact.zip -d artefact
+          ls -la artefact
+          ACTUAL="$( (sha256sum artefact/app-release.apk 2>/dev/null || shasum -a 256 artefact/app-release.apk) | awk '{print $1}')"
+          {
+            echo "artefact_id=${ARTEFACT_ID}"
+            echo "expected_sha256=${EXPECTED_SHA256}"
+            echo "actual_sha256=${ACTUAL}"
+          } | tee fun001-evidence-api35/hash-verification.txt
+          cp fun001-evidence-api35/hash-verification.txt fun001-evidence-lowram/hash-verification.txt
+          if [ "$ACTUAL" != "$EXPECTED_SHA256" ]; then
+            echo "HASH MISMATCH — lane aborts before install"
+            exit 1
+          fi
+          echo "Hash verified byte-for-byte; proceeding to cold runs."
+
+      - name: Full matrix on API 35 (fresh install, launch, sweep, WebView-disabled)
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: arm64-v8a
+          profile: pixel_7_pro
+          avd-name: fun001-main
+          force-avd-creation: true
+          emulator-boot-timeout: 1200
+          script: APK_PATH=$PWD/artefact/app-release.apk FUN001_OUT=$PWD/fun001-evidence-api35 FUN001_PHASES=ABC bash tools/verify-fun001.sh
+
+      - name: Low-RAM run on API 35 (1024 MB, phases A+B)
+        if: always()
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: arm64-v8a
+          profile: pixel_7_pro
+          avd-name: fun001-lowram
+          force-avd-creation: true
+          ram-size: 1024
+          emulator-boot-timeout: 1200
+          script: APK_PATH=$PWD/artefact/app-release.apk FUN001_OUT=$PWD/fun001-evidence-lowram FUN001_PHASES=AB bash tools/verify-fun001.sh
+
+      - name: Upload API 35 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fun001-evidence-api35
+          path: |
+            fun001-evidence-api35/
+            fun001-evidence-lowram/
+          retention-days: 90
+          if-no-files-found: warn
+
+  api-span:
+    name: API span (low end) — phases A+B
+    runs-on: macos-14
+    timeout-minutes: 120
+    steps:
+      - name: Check out repository (lane files only)
+        uses: actions/checkout@v4
+
+      - name: Download sealed artefact by id and verify its hash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p artefact fun001-evidence-span
+          gh api "repos/${{ github.repository }}/actions/artifacts/${ARTEFACT_ID}/zip" > artefact.zip
+          unzip -o artefact.zip -d artefact
+          ls -la artefact
+          ACTUAL="$( (sha256sum artefact/app-release.apk 2>/dev/null || shasum -a 256 artefact/app-release.apk) | awk '{print $1}')"
+          {
+            echo "artefact_id=${ARTEFACT_ID}"
+            echo "expected_sha256=${EXPECTED_SHA256}"
+            echo "actual_sha256=${ACTUAL}"
+          } | tee fun001-evidence-span/hash-verification.txt
+          if [ "$ACTUAL" != "$EXPECTED_SHA256" ]; then
+            echo "HASH MISMATCH — lane aborts before install"
+            exit 1
+          fi
+          echo "Hash verified byte-for-byte; proceeding to cold run."
+
+      - name: Span run (phases A+B)
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ inputs.span_api_level }}
+          arch: arm64-v8a
+          profile: pixel_7_pro
+          avd-name: fun001-span
+          force-avd-creation: true
+          emulator-boot-timeout: 1200
+          script: APK_PATH=$PWD/artefact/app-release.apk FUN001_OUT=$PWD/fun001-evidence-span FUN001_PHASES=AB bash tools/verify-fun001.sh
+
+      - name: Upload span evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fun001-evidence-span
+          path: fun001-evidence-span/
+          retention-days: 90
+          if-no-files-found: warn
