@@ -41,7 +41,16 @@ class WalletManager {
     private val walletAdapter = MobileWalletAdapter(
         connectionIdentity = ConnectionIdentity(
             identityUri = Uri.parse("https://voidrunner-2hm7p.ondigitalocean.app/"),
-            iconUri = Uri.parse("https://voidrunner-2hm7p.ondigitalocean.app/assets/voidrunner-logo-5bj5j5gp.webp"),
+            // v1.0.5 cure (VR-1 defect, §2.2 verdict 2026-10-29): clientlib-ktx
+            // treats iconUri as iconRelativeUri and throws "If non-null,
+            // iconRelativeUri must be a relative Uri" on EVERY transact when
+            // given an absolute URL — no wallet session could ever be
+            // established. The icon must be RELATIVE; the wallet resolves it
+            // against identityUri. This path is the logo the game build
+            // itself ships at the identity origin (client build asset
+            // `assets/voidrunner-logo-5bj5j5gp.webp`), so it resolves to the
+            // exact URL the previous absolute value named.
+            iconUri = Uri.parse("assets/voidrunner-logo-5bj5j5gp.webp"),
             identityName = "VOIDRUNNER"
         )
     )
