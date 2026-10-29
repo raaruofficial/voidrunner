@@ -48,18 +48,35 @@ webview_v="NOT-RUN"; wallet_interaction_v="NOT-RUN"; game_bridge_v="NOT-RUN"
 app_anr="0"; fatal_total="0"; death_total="0"
 
 # --- helpers (carried from verify-cold-run-m8a.sh) ---------------------------
+dump_is_substantive() { # rejects hollow mid-transition dumps (window present,
+  # view tree not yet attached): a 1-node dump with no text, no content-desc
+  # and no WebView node is a race artifact, not a screen. (Observed
+  # 2026-10-29: Phase A first-launch dump = exactly 1 node, text="".)
+  python3 - "$1" <<'PY'
+import re, sys
+data = open(sys.argv[1], encoding="utf-8", errors="ignore").read()
+nodes = re.findall(r"<node[^>]*>", data)
+if len(nodes) >= 3:
+    sys.exit(0)
+for n in nodes:
+    if re.search(r'text="[^"]+"', n) or re.search(r'content-desc="[^"]+"', n) or "WebView" in n:
+        sys.exit(0)
+sys.exit(1)
+PY
+}
+
 dump_ui() { # $1 = destination file; success = complete hierarchy produced
   local dst="$1" attempt
   for attempt in 1 2 3 4 5 6 7 8; do
     adb shell rm -f /sdcard/window_dump.xml >/dev/null 2>&1 || true
     timeout 40 adb shell uiautomator dump /sdcard/window_dump.xml >/dev/null 2>&1 || true
     adb exec-out cat /sdcard/window_dump.xml > "$dst.tmp" 2>/dev/null || true
-    if grep -q "</hierarchy>" "$dst.tmp" 2>/dev/null; then
+    if grep -q "</hierarchy>" "$dst.tmp" 2>/dev/null && dump_is_substantive "$dst.tmp"; then
       mv "$dst.tmp" "$dst"
       log "dump_ui: ok on attempt $attempt -> $dst"
       return 0
     fi
-    log "dump_ui: attempt $attempt produced no complete hierarchy; waiting"
+    log "dump_ui: attempt $attempt produced no complete/substantive hierarchy; waiting"
     sleep 4
   done
   log "dump_ui: FAILED after 8 attempts -> $dst"
@@ -303,8 +320,26 @@ if [ "${PHASES#*C}" != "$PHASES" ] && [ "$install_v" = "ok" ]; then
 
   disabled_ok="0"
   if [ -n "$wv_pkg" ]; then
+    # Escalation ladder (r2 evidence, 2026-10-29): `pm disable` from the
+    # shell throws SecurityException on this package; `pm disable-user`
+    # reports 'disabled-user' but WebViewUpdateService keeps the sole
+    # provider current anyway. Escalate: hide, then uninstall-for-user-0.
+    # Success is judged ONLY by the dumpsys current-provider check below.
     adb shell pm disable "$wv_pkg" > "$TMPD/wv-disable.log" 2>&1 || true
     adb shell pm disable-user --user 0 "$wv_pkg" >> "$TMPD/wv-disable.log" 2>&1 || true
+    sleep 3
+    cur_try="$(adb shell dumpsys webviewupdate 2>/dev/null | sed -n 's/.*Current WebView package (name, version): (\([^,]*\),.*/\1/p' | head -n 1 | tr -d '\r')"
+    if [ "$cur_try" = "$wv_pkg" ]; then
+      echo "escalating: pm hide" >> "$TMPD/wv-disable.log"
+      adb shell pm hide "$wv_pkg" >> "$TMPD/wv-disable.log" 2>&1 || true
+      sleep 3
+      cur_try="$(adb shell dumpsys webviewupdate 2>/dev/null | sed -n 's/.*Current WebView package (name, version): (\([^,]*\),.*/\1/p' | head -n 1 | tr -d '\r')"
+    fi
+    if [ "$cur_try" = "$wv_pkg" ]; then
+      echo "escalating: pm uninstall --user 0" >> "$TMPD/wv-disable.log"
+      adb shell pm uninstall --user 0 "$wv_pkg" >> "$TMPD/wv-disable.log" 2>&1 || true
+      sleep 3
+    fi
     cat "$TMPD/wv-disable.log" | tee -a "$LANE_LOG" || true
     {
       echo "after disable attempts:"
@@ -314,7 +349,12 @@ if [ "${PHASES#*C}" != "$PHASES" ] && [ "$install_v" = "ok" ]; then
     } > "$OUT/webview-provider-after-disable.txt"
     cur_after="$(adb shell dumpsys webviewupdate 2>/dev/null | sed -n 's/.*Current WebView package (name, version): (\([^,]*\),.*/\1/p' | head -n 1 | tr -d '\r')"
     log "phaseC: current provider after disable attempts = '$cur_after' (target was '$wv_pkg')"
-    if adb shell pm list packages -d 2>/dev/null | tr -d '\r' | grep -q "$wv_pkg" && [ "$cur_after" != "$wv_pkg" ]; then
+    # The operative fact is the WebViewUpdateService's current provider:
+    # if it no longer names the target package, apps on this device have
+    # no valid WebView provider (the KFC-003 test condition), whichever
+    # rung of the ladder (disable-user / hide / uninstall-for-user) got
+    # us there.
+    if [ -n "$wv_pkg" ] && [ "$cur_after" != "$wv_pkg" ]; then
       disabled_ok="1"
     fi
   fi

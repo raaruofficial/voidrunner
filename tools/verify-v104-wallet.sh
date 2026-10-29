@@ -45,13 +45,28 @@ fatal_vr_total="0"; fatal_mock_total="0"; ise_total="0"; stopped_dialogs="0"
 lock_pin="unknown"; lock_fp="unknown"; auth_note="not attempted"
 
 # --- helpers (carried from verify-fun001.sh, JUDGE Amendment 2 hardening) -----
+dump_is_substantive() { # rejects hollow mid-transition dumps (1 node, no
+  # text/content-desc, no WebView) — a race artifact, not a screen.
+  python3 - "$1" <<'PY'
+import re, sys
+data = open(sys.argv[1], encoding="utf-8", errors="ignore").read()
+nodes = re.findall(r"<node[^>]*>", data)
+if len(nodes) >= 3:
+    sys.exit(0)
+for n in nodes:
+    if re.search(r'text="[^"]+"', n) or re.search(r'content-desc="[^"]+"', n) or "WebView" in n:
+        sys.exit(0)
+sys.exit(1)
+PY
+}
+
 dump_ui() { # $1 = destination file
   local dst="$1" attempt
   for attempt in 1 2 3 4 5 6 7 8; do
     adb shell rm -f /sdcard/window_dump.xml >/dev/null 2>&1 || true
     timeout 40 adb shell uiautomator dump /sdcard/window_dump.xml >/dev/null 2>&1 || true
     adb exec-out cat /sdcard/window_dump.xml > "$dst.tmp" 2>/dev/null || true
-    if grep -q "</hierarchy>" "$dst.tmp" 2>/dev/null; then
+    if grep -q "</hierarchy>" "$dst.tmp" 2>/dev/null && dump_is_substantive "$dst.tmp"; then
       mv "$dst.tmp" "$dst"
       return 0
     fi
