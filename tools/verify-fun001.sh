@@ -44,7 +44,7 @@ log() { echo "$*" | tee -a "$LANE_LOG"; }
 # --- verdict state -----------------------------------------------------------
 install_v="NOT-RUN"; first_launch_v="NOT-RUN"; dialog_first_v="unknown"
 play_v="NOT-RUN"; wallet_v="NOT-RUN"; settings_v="NOT-RUN"
-webview_v="NOT-RUN"; wallet_interaction_v="NOT-RUN"
+webview_v="NOT-RUN"; wallet_interaction_v="NOT-RUN"; game_bridge_v="NOT-RUN"
 app_anr="0"; fatal_total="0"; death_total="0"
 
 # --- helpers (carried from verify-cold-run-m8a.sh) ---------------------------
@@ -408,6 +408,105 @@ if [ "${PHASES#*W}" != "$PHASES" ] && [ "$install_v" = "ok" ]; then
   log "phaseW: wallet_interaction=$wallet_interaction_v"
 fi
 
+# === Phase G — bridge path: in-game wallet action from the WebView =============
+# VoidrunnerWalletBridge constructs ActivityResultSender(activity) inline
+# inside its @JavascriptInterface methods (connect :69, signMessage :88,
+# signAndSendTransactions :113), evaluated when the hosted game invokes
+# them — activity RESUMED, same registration-throw class as Phase W.
+# Instrument: enter PLAY, let the live game load, find an actionable
+# wallet/bind/connect node in the WebView accessibility hierarchy and tap
+# it. If no such node is exposed, the phase is NOT-RUN with the dumps
+# filed — no blind taps are reported as bridge evidence. The node text
+# actually tapped is logged verbatim for honesty.
+if [ "${PHASES#*G}" != "$PHASES" ] && [ "$install_v" = "ok" ]; then
+  if ! pid_alive; then
+    log "phaseG: process not alive at phase start; relaunching"
+    adb shell am start -W -n "$ACT" >/dev/null 2>&1 || true
+    sleep 8
+  fi
+  back_home || true
+  adb logcat -c >/dev/null 2>&1 || true
+  if dump_ui "$OUT/hier-g-home.xml" && tap_text "$OUT/hier-g-home.xml" "PLAY"; then
+    log "phaseG: tapped PLAY via dump bounds"
+  else
+    log "phaseG: tapped PLAY via fallback fraction"
+    tap_frac 0.5 0.475
+  fi
+  sleep 12
+  find_wallet_node() { # $1 = hierarchy file; prints "x y text" for first match
+    python3 - "$1" <<'PY'
+import re, sys
+data = open(sys.argv[1], encoding="utf-8", errors="ignore").read()
+prio = ["CONNECT", "BIND", "SIGN", "WALLET", "LINK"]
+nodes = []
+for m in re.finditer(r'<node[^>]*>', data):
+    tag = m.group(0)
+    t = re.search(r'text="([^"]*)"', tag)
+    d = re.search(r'content-desc="([^"]*)"', tag)
+    b = re.search(r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', tag)
+    if not b:
+        continue
+    label = ((t.group(1) if t else "") + " " + (d.group(1) if d else "")).strip()
+    if not label:
+        continue
+    up = label.upper()
+    for i, kw in enumerate(prio):
+        if kw in up:
+            x = (int(b.group(1)) + int(b.group(3))) // 2
+            y = (int(b.group(2)) + int(b.group(4))) // 2
+            nodes.append((i, x, y, label))
+            break
+nodes.sort()
+if nodes:
+    _, x, y, label = nodes[0]
+    print(f"{x} {y} {label}")
+PY
+  }
+  tapped_node=""
+  for attempt in 1 2; do
+    if dump_ui "$OUT/hier-g-game-$attempt.xml"; then
+      found="$(find_wallet_node "$OUT/hier-g-game-$attempt.xml")"
+      if [ -n "$found" ]; then
+        coords="$(printf '%s' "$found" | awk '{print $1, $2}')"
+        tapped_node="$(printf '%s' "$found" | cut -d' ' -f3-)"
+        log "phaseG: tapping in-game node '$tapped_node' at $coords (attempt $attempt)"
+        # shellcheck disable=SC2086
+        adb shell input tap $coords
+        break
+      fi
+    fi
+    log "phaseG: no wallet-action node in dump $attempt; nudging game with centre tap"
+    adb exec-out screencap -p > "$OUT/g-game-$attempt.png" 2>/dev/null || true
+    tap_frac 0.5 0.5
+    sleep 8
+  done
+  if [ -n "$tapped_node" ]; then
+    sleep 8
+    maybe_dismiss_anr "phaseG"
+    adb logcat -d > "$OUT/logcat-phaseG.txt" 2>&1 || true
+    count_app_crashes "$OUT/logcat-phaseG.txt"
+    extract_stacks "$OUT/logcat-phaseG.txt" "$OUT/stacks-phaseG.txt"
+    adb exec-out screencap -p > "$OUT/g-after-tap.png" 2>/dev/null || true
+    dump_ui "$OUT/hier-g-after.xml" || true
+    if grep -A3 "FATAL EXCEPTION" "$OUT/logcat-phaseG.txt" 2>/dev/null | grep -q "Process: $PKG"; then
+      game_bridge_v="CRASH(app FATAL EXCEPTION after in-game node '$tapped_node' tap — see stacks-phaseG.txt)"
+    elif ! pid_alive; then
+      game_bridge_v="CRASH(process dead after in-game node '$tapped_node' tap)"
+    elif [ -f "$OUT/hier-g-after.xml" ] && has_stopped_dialog "$OUT/hier-g-after.xml"; then
+      game_bridge_v="CRASH('has stopped' dialog after in-game node '$tapped_node' tap)"
+    elif pid_alive; then
+      game_bridge_v="NO_CRASH(process alive after in-game node '$tapped_node' tap; see hier-g-after.xml)"
+    else
+      game_bridge_v="INDETERMINATE(see phase G evidence)"
+    fi
+  else
+    adb logcat -d > "$OUT/logcat-phaseG.txt" 2>&1 || true
+    adb exec-out screencap -p > "$OUT/g-final.png" 2>/dev/null || true
+    game_bridge_v="NOT-RUN(no wallet-action node exposed in WebView hierarchy; see hier-g-game-*.xml)"
+  fi
+  log "phaseG: game_bridge=$game_bridge_v"
+fi
+
 # === Verdict ====================================================================
 adb logcat -d > "$OUT/logcat-final.txt" 2>&1 || true
 {
@@ -419,6 +518,7 @@ adb logcat -d > "$OUT/logcat-final.txt" 2>&1 || true
   echo "menu_settings=$settings_v"
   echo "webview_disabled=$webview_v"
   echo "wallet_interaction=$wallet_interaction_v"
+  echo "game_bridge=$game_bridge_v"
   echo "app_fatal_blocks_total=$fatal_total"
   echo "process_death_lines_total=$death_total"
 } > "$OUT/verdict.txt"
@@ -432,6 +532,7 @@ fail="0"
 [ "$settings_v" = "FAIL" ] && fail="1"
 case "$webview_v" in CRASH*) fail="1";; esac
 case "$wallet_interaction_v" in CRASH*) fail="1";; esac
+case "$game_bridge_v" in CRASH*) fail="1";; esac
 if [ "$fail" = "1" ]; then
   echo "verify-fun001: FAIL (see verdict.txt)"
   exit 1
