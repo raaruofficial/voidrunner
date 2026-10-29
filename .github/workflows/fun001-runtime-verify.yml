@@ -16,6 +16,16 @@ on:
         description: "Low-end API level for the span job (app minSdk is 28)"
         required: true
         default: "28"
+      run_main_matrix:
+        description: "Run the API 35 + API span matrix jobs"
+        type: boolean
+        required: true
+        default: true
+      run_wallet_interaction:
+        description: "Run the wallet-interaction job (Phase A+W: CONNECT WALLET tap)"
+        type: boolean
+        required: true
+        default: false
 
 permissions:
   contents: read
@@ -28,6 +38,7 @@ env:
 jobs:
   api-current:
     name: API 35 — full matrix (A+B+C) + low-RAM (A+B)
+    if: ${{ inputs.run_main_matrix }}
     runs-on: macos-14
     timeout-minutes: 150
     steps:
@@ -93,6 +104,7 @@ jobs:
 
   api-span:
     name: API span (low end) — phases A+B
+    if: ${{ inputs.run_main_matrix }}
     runs-on: macos-14
     timeout-minutes: 120
     steps:
@@ -137,5 +149,55 @@ jobs:
         with:
           name: fun001-evidence-span
           path: fun001-evidence-span/
+          retention-days: 90
+          if-no-files-found: warn
+
+  wallet-interaction:
+    name: API 35 — wallet interaction (A+W, CONNECT WALLET tap)
+    if: ${{ inputs.run_wallet_interaction }}
+    runs-on: macos-14
+    timeout-minutes: 90
+    steps:
+      - name: Check out repository (lane files only)
+        uses: actions/checkout@v4
+
+      - name: Download sealed artefact by id and verify its hash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p artefact fun001-evidence-wallet
+          gh api "repos/${{ github.repository }}/actions/artifacts/${ARTEFACT_ID}/zip" > artefact.zip
+          unzip -o artefact.zip -d artefact
+          ls -la artefact
+          ACTUAL="$( (sha256sum artefact/app-release.apk 2>/dev/null || shasum -a 256 artefact/app-release.apk) | awk '{print $1}')"
+          {
+            echo "artefact_id=${ARTEFACT_ID}"
+            echo "expected_sha256=${EXPECTED_SHA256}"
+            echo "actual_sha256=${ACTUAL}"
+          } | tee fun001-evidence-wallet/hash-verification.txt
+          if [ "$ACTUAL" != "$EXPECTED_SHA256" ]; then
+            echo "HASH MISMATCH — lane aborts before install"
+            exit 1
+          fi
+          echo "Hash verified byte-for-byte; proceeding to cold run."
+
+      - name: Wallet interaction run (phases A+W)
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: arm64-v8a
+          profile: pixel_7_pro
+          avd-name: fun001-wallet
+          force-avd-creation: true
+          emulator-boot-timeout: 1200
+          script: APK_PATH=$PWD/artefact/app-release.apk FUN001_OUT=$PWD/fun001-evidence-wallet FUN001_PHASES=AW bash tools/verify-fun001.sh
+
+      - name: Upload wallet-interaction evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fun001-evidence-wallet
+          path: fun001-evidence-wallet/
           retention-days: 90
           if-no-files-found: warn

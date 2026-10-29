@@ -44,7 +44,8 @@ log() { echo "$*" | tee -a "$LANE_LOG"; }
 # --- verdict state -----------------------------------------------------------
 install_v="NOT-RUN"; first_launch_v="NOT-RUN"; dialog_first_v="unknown"
 play_v="NOT-RUN"; wallet_v="NOT-RUN"; settings_v="NOT-RUN"
-webview_v="NOT-RUN"; app_anr="0"; fatal_total="0"; death_total="0"
+webview_v="NOT-RUN"; wallet_interaction_v="NOT-RUN"
+app_anr="0"; fatal_total="0"; death_total="0"
 
 # --- helpers (carried from verify-cold-run-m8a.sh) ---------------------------
 dump_ui() { # $1 = destination file; success = complete hierarchy produced
@@ -352,6 +353,61 @@ if [ "${PHASES#*C}" != "$PHASES" ] && [ "$install_v" = "ok" ]; then
   fi
 fi
 
+# === Phase W — wallet interaction: CONNECT WALLET tap ==========================
+# The estate's device-proved crash class (Paper Moon v0.2.4): constructing
+# the MWA clientlib ActivityResultSender while the activity lifecycle is
+# RESUMED throws IllegalStateException from ActivityResultRegistry.register
+# ("LifecycleOwners must call register before they are STARTED"). VOIDRUNNER
+# constructs ActivityResultSender(activity) at event time — inside the
+# CONNECT WALLET / TRY AGAIN click handlers (WalletScreen) and inside the
+# WebView bridge calls — never in onCreate. Navigation alone (Phase B)
+# cannot reach those sites; this phase taps CONNECT WALLET on a wallet-less
+# emulator: if construction throws, the process dies BEFORE any wallet is
+# needed; if construction succeeds, MWA connect fails soft into the app's
+# own Error/Working state with the process alive.
+if [ "${PHASES#*W}" != "$PHASES" ] && [ "$install_v" = "ok" ]; then
+  if ! pid_alive; then
+    log "phaseW: process not alive at phase start; relaunching"
+    adb shell am start -W -n "$ACT" >/dev/null 2>&1 || true
+    sleep 8
+  fi
+  back_home || true
+  if dump_ui "$OUT/hier-w-before.xml" && tap_text "$OUT/hier-w-before.xml" "WALLET"; then
+    log "phaseW: tapped WALLET via dump bounds"
+  else
+    log "phaseW: tapped WALLET via fallback fraction"
+    tap_frac 0.5 0.55
+  fi
+  sleep 5
+  adb logcat -c >/dev/null 2>&1 || true
+  if dump_ui "$OUT/hier-w-wallet.xml" && tap_text "$OUT/hier-w-wallet.xml" "CONNECT WALLET"; then
+    log "phaseW: tapped CONNECT WALLET via dump bounds"
+  else
+    log "phaseW: CONNECT WALLET not tappable from a produced dump"
+  fi
+  sleep 7
+  maybe_dismiss_anr "phaseW"
+  adb logcat -d > "$OUT/logcat-phaseW.txt" 2>&1 || true
+  count_app_crashes "$OUT/logcat-phaseW.txt"
+  extract_stacks "$OUT/logcat-phaseW.txt" "$OUT/stacks-phaseW.txt"
+  adb exec-out screencap -p > "$OUT/phaseW-after-connect.png" 2>/dev/null || true
+  dump_ui "$OUT/hier-w-after.xml" || true
+  if grep -A3 "FATAL EXCEPTION" "$OUT/logcat-phaseW.txt" 2>/dev/null | grep -q "Process: $PKG"; then
+    wallet_interaction_v="CRASH(app FATAL EXCEPTION after CONNECT WALLET tap — see stacks-phaseW.txt)"
+  elif ! pid_alive; then
+    wallet_interaction_v="CRASH(process dead after CONNECT WALLET tap)"
+  elif [ -f "$OUT/hier-w-after.xml" ] && has_stopped_dialog "$OUT/hier-w-after.xml"; then
+    wallet_interaction_v="CRASH('has stopped' dialog after CONNECT WALLET tap)"
+  elif [ -f "$OUT/hier-w-after.xml" ] && grep -qE "TRY AGAIN|Waiting for wallet" "$OUT/hier-w-after.xml"; then
+    wallet_interaction_v="NO_CRASH(reached post-tap wallet state)"
+  elif pid_alive; then
+    wallet_interaction_v="NO_CRASH(process alive after CONNECT WALLET tap; see hier-w-after.xml)"
+  else
+    wallet_interaction_v="INDETERMINATE(see phase W evidence)"
+  fi
+  log "phaseW: wallet_interaction=$wallet_interaction_v"
+fi
+
 # === Verdict ====================================================================
 adb logcat -d > "$OUT/logcat-final.txt" 2>&1 || true
 {
@@ -362,6 +418,7 @@ adb logcat -d > "$OUT/logcat-final.txt" 2>&1 || true
   echo "menu_wallet=$wallet_v"
   echo "menu_settings=$settings_v"
   echo "webview_disabled=$webview_v"
+  echo "wallet_interaction=$wallet_interaction_v"
   echo "app_fatal_blocks_total=$fatal_total"
   echo "process_death_lines_total=$death_total"
 } > "$OUT/verdict.txt"
@@ -374,6 +431,7 @@ fail="0"
 [ "$wallet_v" = "FAIL" ] && fail="1"
 [ "$settings_v" = "FAIL" ] && fail="1"
 case "$webview_v" in CRASH*) fail="1";; esac
+case "$wallet_interaction_v" in CRASH*) fail="1";; esac
 if [ "$fail" = "1" ]; then
   echo "verify-fun001: FAIL (see verdict.txt)"
   exit 1
