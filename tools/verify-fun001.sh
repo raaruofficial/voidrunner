@@ -374,20 +374,41 @@ if [ "${PHASES#*C}" != "$PHASES" ] && [ "$install_v" = "ok" ]; then
     c_home="0"
     if back_home; then c_home="1"; fi
     log "phaseC: home reachable with provider disabled = $c_home"
-    if dump_ui "$OUT/hier-wv-home.xml" && tap_text "$OUT/hier-wv-home.xml" "PLAY"; then
-      log "phaseC: tapped PLAY via dump bounds"
-    else
-      tap_frac 0.5 0.475
-      log "phaseC: tapped PLAY via fallback fraction"
+    # Settle loop: the host Pixel Launcher ANR dialog recurs on this
+    # image and covered EVERY dump in r5 — PLAY was fraction-tapped
+    # blind and the leg's observation was contaminated. Require a dump
+    # that actually shows the app's home menu before tapping, and tap
+    # PLAY by bounds only; otherwise the leg is NOT-RUN, never guessed.
+    play_tapped="0"
+    for try in 1 2 3 4 5 6; do
+      if dump_ui "$OUT/hier-wv-home.xml" && grep -q "PLAY" "$OUT/hier-wv-home.xml" && grep -q "WALLET" "$OUT/hier-wv-home.xml"; then
+        if tap_text "$OUT/hier-wv-home.xml" "PLAY"; then
+          play_tapped="1"
+          log "phaseC: tapped PLAY via dump bounds (settle try $try)"
+          break
+        fi
+      fi
+      maybe_dismiss_anr "webview-disabled-settle-$try"
+      sleep 3
+    done
+    if [ "$play_tapped" != "1" ]; then
+      webview_v="NOT-RUN(home menu never cleanly observable — host launcher ANR dialog covered every dump; provider removal itself was verified)"
+      log "phaseC: $webview_v"
+      adb shell pm enable "$wv_pkg" >/dev/null 2>&1 || true
+      adb shell cmd package install-existing "$wv_pkg" >/dev/null 2>&1 || true
     fi
+    if [ "$play_tapped" = "1" ]; then
     sleep 7
+    maybe_dismiss_anr "webview-disabled-postplay"
     adb logcat -d > "$OUT/logcat-webview-disabled.txt" 2>&1 || true
     count_app_crashes "$OUT/logcat-webview-disabled.txt"
     extract_stacks "$OUT/logcat-webview-disabled.txt" "$OUT/stacks-webview-disabled.txt"
     adb exec-out screencap -p > "$OUT/webview-disabled.png" 2>/dev/null || true
     dump_ui "$OUT/hier-webview-disabled.xml" || true
 
-    if grep -A3 "FATAL EXCEPTION" "$OUT/logcat-webview-disabled.txt" 2>/dev/null | grep -q "Process: $PKG"; then
+    if [ -f "$OUT/hier-webview-disabled.xml" ] && grep -q "isn.t responding" "$OUT/hier-webview-disabled.xml"; then
+      webview_v="NOT-RUN(post-PLAY hierarchy still covered by the host ANR dialog — observation contaminated, see evidence)"
+    elif grep -A3 "FATAL EXCEPTION" "$OUT/logcat-webview-disabled.txt" 2>/dev/null | grep -q "Process: $PKG"; then
       webview_v="CRASH(app FATAL EXCEPTION with provider disabled — see stacks-webview-disabled.txt)"
     elif ! pid_alive; then
       webview_v="CRASH(process dead after PLAY with provider disabled)"
@@ -401,7 +422,9 @@ if [ "${PHASES#*C}" != "$PHASES" ] && [ "$install_v" = "ok" ]; then
       webview_v="INDETERMINATE(see phase C evidence)"
     fi
     adb shell pm enable "$wv_pkg" >/dev/null 2>&1 || true
+    adb shell cmd package install-existing "$wv_pkg" >/dev/null 2>&1 || true
     log "phaseC: provider re-enabled; verdict=$webview_v"
+    fi
   else
     webview_v="NOT-RUN(could not disable WebView provider '$wv_pkg' — see webview-provider-*.txt)"
     log "phaseC: $webview_v"
