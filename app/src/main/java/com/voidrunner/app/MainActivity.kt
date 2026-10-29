@@ -16,6 +16,7 @@ import com.voidrunner.app.ui.SettingsScreen
 import com.voidrunner.app.ui.SplashScreen
 import com.voidrunner.app.ui.WalletScreen
 import com.voidrunner.app.ui.theme.VoidrunnerTheme
+import com.solana.mobilewalletadapter.clientlib.ActivityResultSender
 
 /**
  * Single-activity app. All navigation is native Compose Navigation —
@@ -23,8 +24,26 @@ import com.voidrunner.app.ui.theme.VoidrunnerTheme
  */
 class MainActivity : ComponentActivity() {
 
+    /**
+     * The app's single MWA activity-result sender (v1.0.4 crash fix).
+     * [ActivityResultSender] registers an activity-result launcher in
+     * its constructor, and AndroidX permits registration only before
+     * the owner lifecycle reaches STARTED — so the sender is created
+     * here, in onCreate before setContent, and shared with the game
+     * screen's wallet bridge and the wallet screen. The pre-fix build
+     * constructed senders inline at interaction time — inside wallet
+     * screen tap handlers and inside bridge methods invoked from the
+     * WebView — when the activity is already RESUMED; registration
+     * threw IllegalStateException and wallet interactions crashed
+     * (the ActivityResultSender-at-RESUMED class that killed HAUNT
+     * v0.1.7/v0.1.8 and Paper Moon v0.2.3/v0.2.4 in store review).
+     */
+    lateinit var activityResultSender: ActivityResultSender
+        private set
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        activityResultSender = ActivityResultSender(this)
         enableEdgeToEdge()
         setContent {
             VoidrunnerTheme {
@@ -42,10 +61,11 @@ class MainActivity : ComponentActivity() {
                         composable("game") {
                             GameScreen(
                                 navController = navController,
+                                sender = activityResultSender,
                                 onExit = { navController.popBackStack() }
                             )
                         }
-                        composable("wallet") { WalletScreen(navController) }
+                        composable("wallet") { WalletScreen(navController, activityResultSender) }
                         composable("settings") { SettingsScreen(navController) }
                     }
                 }

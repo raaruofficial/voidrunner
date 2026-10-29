@@ -1,7 +1,6 @@
 package com.voidrunner.app.wallet
 
 import android.util.Base64
-import androidx.activity.ComponentActivity
 import android.webkit.JavascriptInterface
 import com.solana.mobilewalletadapter.clientlib.ActivityResultSender
 import kotlinx.coroutines.CoroutineScope
@@ -34,10 +33,16 @@ import org.json.JSONObject
  * Seeker's Seed Vault wallet through Mobile Wallet Adapter.
  */
 class VoidrunnerWalletBridge(
-    private val activity: ComponentActivity,
     private val walletManager: WalletManager,
+    private val sender: ActivityResultSender,
     private val evaluateJs: (script: String) -> Unit
 ) {
+    // v1.0.4 crash fix: the sender is injected — it is constructed
+    // once in MainActivity.onCreate. This class previously built a
+    // new sender inline inside each operation method; those methods
+    // run when the activity is RESUMED, so the sender constructor's
+    // activity-result registration threw IllegalStateException and
+    // wallet calls from the game crashed the process.
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     // ------------------------------------------------------------------
@@ -66,7 +71,7 @@ class VoidrunnerWalletBridge(
     @JavascriptInterface
     fun connectWallet(requestId: String): String {
         scope.launch {
-            walletManager.connect(ActivityResultSender(activity)).fold(
+            walletManager.connect(sender).fold(
                 onSuccess = { pubkey ->
                     resolveOk(requestId, JSONObject().put("publicKey", pubkey))
                 },
@@ -85,7 +90,7 @@ class VoidrunnerWalletBridge(
     @JavascriptInterface
     fun signMessage(requestId: String, message: String): String {
         scope.launch {
-            walletManager.signMessage(ActivityResultSender(activity), message).fold(
+            walletManager.signMessage(sender, message).fold(
                 onSuccess = { sig ->
                     resolveOk(requestId, JSONObject().put("signature", sig))
                 },
@@ -110,7 +115,7 @@ class VoidrunnerWalletBridge(
                 resolveErr(requestId, "invalid transaction encoding: ${e.message}")
                 return@launch
             }
-            walletManager.signAndSendTransactions(ActivityResultSender(activity), listOf(tx)).fold(
+            walletManager.signAndSendTransactions(sender, listOf(tx)).fold(
                 onSuccess = { sigs ->
                     resolveOk(requestId, JSONObject().put("signature", sigs.firstOrNull() ?: ""))
                 },

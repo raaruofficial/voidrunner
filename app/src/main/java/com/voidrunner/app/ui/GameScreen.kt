@@ -1,7 +1,6 @@
 package com.voidrunner.app.ui
 
 import android.annotation.SuppressLint
-import androidx.activity.ComponentActivity
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
@@ -20,6 +19,7 @@ import androidx.navigation.NavController
 import com.voidrunner.app.VoidrunnerApp
 import com.voidrunner.app.game.GameConfig
 import com.voidrunner.app.wallet.VoidrunnerWalletBridge
+import com.solana.mobilewalletadapter.clientlib.ActivityResultSender
 
 /**
  * The game screen. The *game* renders in a WebView, but everything around it
@@ -32,9 +32,8 @@ import com.voidrunner.app.wallet.VoidrunnerWalletBridge
  */
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
-fun GameScreen(navController: NavController, onExit: () -> Unit) {
+fun GameScreen(navController: NavController, sender: ActivityResultSender, onExit: () -> Unit) {
     val context = LocalContext.current
-    val activity = context as ComponentActivity
     val walletManager = remember { (context.applicationContext as VoidrunnerApp).walletManager }
     val webView = remember { mutableStateOf<WebView?>(null) }
 
@@ -72,8 +71,8 @@ fun GameScreen(navController: NavController, onExit: () -> Unit) {
                 // No browser chrome: the game handles its own navigation internally.
                 webViewClient = WebViewClient()
                 val bridge = VoidrunnerWalletBridge(
-                    activity = activity,
                     walletManager = walletManager,
+                    sender = sender,
                     evaluateJs = { js -> post { evaluateJavascript(js, null) } }
                 )
                 addJavascriptInterface(bridge, GameConfig.BRIDGE_NAME)

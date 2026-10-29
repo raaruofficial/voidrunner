@@ -1,6 +1,5 @@
 package com.voidrunner.app.ui
 
-import androidx.activity.ComponentActivity
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -43,9 +42,13 @@ import kotlinx.coroutines.launch
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun WalletScreen(navController: NavController) {
+fun WalletScreen(navController: NavController, sender: ActivityResultSender) {
+    // v1.0.4 crash fix: [sender] is the activity's single
+    // ActivityResultSender, created in MainActivity.onCreate. This
+    // screen previously constructed a new sender inline in every tap
+    // handler — at RESUMED, where AndroidX throws IllegalStateException
+    // on registration.
     val context = LocalContext.current
-    val activity = context as ComponentActivity
     val walletManager = (context.applicationContext as VoidrunnerApp).walletManager
     val state by walletManager.uiState.collectAsState()
     val scope = rememberCoroutineScope()
@@ -74,7 +77,7 @@ fun WalletScreen(navController: NavController) {
                     Button(
                         onClick = {
                             scope.launch {
-                                walletManager.connect(ActivityResultSender(activity))
+                                walletManager.connect(sender)
                             }
                         },
                         modifier = Modifier.fillMaxWidth(0.8f).height(52.dp)
@@ -109,7 +112,7 @@ fun WalletScreen(navController: NavController) {
                         onClick = {
                             scope.launch {
                                 walletManager.signMessage(
-                                    ActivityResultSender(activity),
+                                    sender,
                                     "VOIDRUNNER sign-in"
                                 )
                             }
@@ -119,7 +122,7 @@ fun WalletScreen(navController: NavController) {
                     Spacer(Modifier.height(12.dp))
                     OutlinedButton(
                         onClick = {
-                            scope.launch { walletManager.disconnect(ActivityResultSender(activity)) }
+                            scope.launch { walletManager.disconnect(sender) }
                         },
                         modifier = Modifier.fillMaxWidth(0.8f).height(52.dp)
                     ) { Text("DISCONNECT") }
@@ -132,7 +135,7 @@ fun WalletScreen(navController: NavController) {
                     Button(
                         onClick = {
                             scope.launch {
-                                walletManager.connect(ActivityResultSender(activity))
+                                walletManager.connect(sender)
                             }
                         },
                         modifier = Modifier.fillMaxWidth(0.8f).height(52.dp)
