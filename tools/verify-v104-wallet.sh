@@ -488,7 +488,11 @@ ensure_connected() { # $1 = evidence tag
 
 ensure_disconnected() {
   goto_wallet || return 1
-  if [ "$(vr_state "$TMPD/ed.xml")" = "disconnected" ]; then return 0; fi
+  local st; st="$(vr_state "$TMPD/ed.xml")"
+  # The Error state IS a disconnected state (no session; TRY AGAIN is
+  # the retry control) — VR-8 in r4 starved on this bookkeeping after
+  # VR-7 left the app in Error.
+  if [ "$st" = "disconnected" ] || [ "$st" = "error" ]; then return 0; fi
   do_disconnect "ensure"
 }
 
