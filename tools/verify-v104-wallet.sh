@@ -157,14 +157,31 @@ wait_for() { # $1 = grep pattern, $2 = timeout secs, $3 = dump file; polls dumps
 }
 
 scan_logcat() { # $1 = file; updates global fatal/ise counters
-  local f="$1" a b c
+  # The verdict-gating IllegalStateException count is SCOPED to the
+  # KFC-001 signature: an ISE whose context names ActivityResultSender /
+  # ActivityResultRegistry. A raw count over a full logcat buffer counts
+  # unrelated system noise (r3: 20 hits, all GMS EmojiCompat + Settings
+  # indexing, zero sender signatures) — recorded as informational only.
+  local f="$1" a b c raw
   a="$(grep -A3 "FATAL EXCEPTION" "$f" 2>/dev/null | grep -c "Process: $PKG" || true)"
   b="$(grep -A3 "FATAL EXCEPTION" "$f" 2>/dev/null | grep -c "Process: $MOCK" || true)"
-  c="$(grep -c "IllegalStateException" "$f" 2>/dev/null || true)"
+  c="$(python3 - "$f" <<'PY' || echo 0
+import re, sys
+lines = open(sys.argv[1], encoding="utf-8", errors="ignore").read().splitlines()
+hits = 0
+for i, ln in enumerate(lines):
+    if "IllegalStateException" in ln:
+        ctx = "\n".join(lines[max(0, i-3): i+12])
+        if "ActivityResultSender" in ctx or "ActivityResultRegistry" in ctx:
+            hits += 1
+print(hits)
+PY
+)"
+  raw="$(grep -c "IllegalStateException" "$f" 2>/dev/null || true)"
   fatal_vr_total=$((fatal_vr_total + ${a:-0}))
   fatal_mock_total=$((fatal_mock_total + ${b:-0}))
   ise_total=$((ise_total + ${c:-0}))
-  log "scan: $f vr_fatal=${a:-0} mock_fatal=${b:-0} illegal_state=${c:-0}"
+  log "scan: $f vr_fatal=${a:-0} mock_fatal=${b:-0} sender_signature_ise=${c:-0} (raw_system_ise=${raw:-0}, informational)"
 }
 
 capture_window() { # $1 = tag; dumps logcat since last clear into evidence + scans
@@ -296,8 +313,11 @@ authenticate_mock() {
   local f="$TMPD/mock-main.xml"
   dump_ui "$f" || return 1
   grep -oE 'text="[^"]+"' "$f" | sort -u | head -12 | tee -a "$LANE_LOG" || true
-  if grep -q "Authenticate" "$f"; then
-    tap_exact "$f" "Authenticate" || tap_text "$f" "Authenticate" || return 1
+  # The button's dump text is 'AUTHENTICATE' (Material all-caps) — r3
+  # searched for 'Authenticate' and missed a healthy mock main screen
+  # that showed Name/Address/AUTHENTICATE exactly as configured.
+  if grep -q "AUTHENTICATE\|Authenticate" "$f"; then
+    tap_exact "$f" "AUTHENTICATE" || tap_exact "$f" "Authenticate" || tap_text "$f" "UTHENTICATE" || return 1
     if satisfy_auth_prompt; then
       date +%s > "$AUTH_EPOCH_FILE"
       auth_note="authenticated (window opened $(date -u +%H:%M:%S)Z)"
@@ -446,6 +466,12 @@ ensure_disconnected() {
   do_disconnect "ensure"
 }
 
+identity_wall() { # 0 if the wallet screen shows the clientlib identity rejection
+  local f="$TMPD/wall.xml"
+  dump_ui "$f" || return 1
+  grep -q "iconRelativeUri" "$f"
+}
+
 # --- VR-1: connect (the KFC-001 press path) -----------------------------------------
 cell_vr1() {
   log "=== VR-1 connect ==="
@@ -458,7 +484,28 @@ cell_vr1() {
   dump_ui "$TMPD/vr1-dis.xml" || true
   tap_text "$TMPD/vr1-dis.xml" "CONNECT WALLET" || tap_text "$TMPD/vr1-dis.xml" "TRY AGAIN" || { vr1="FAIL(no connect control)"; return; }
   if ! approve_connect_sheet "vr1"; then
-    vr1="FAIL(no mock approval sheet)"
+    # Distinguish 'wallet never engaged' causes from the app's own error
+    # surface: if the wallet screen sits in its Error state, quote the
+    # message verbatim — r3 surfaced the clientlib identity rejection
+    # ('If non-null, iconRelativeUri must be a relative Uri') this way.
+    local st2 msg
+    st2="$(vr_state "$OUT/hier-vr1-errorstate.xml")"
+    msg=""
+    if [ "$st2" = "error" ]; then
+      msg="$(python3 - "$OUT/hier-vr1-errorstate.xml" <<'PY' || true
+import re, sys
+texts = re.findall(r'text="([^"]+)"', open(sys.argv[1], encoding="utf-8", errors="ignore").read())
+skip = {"Error", "TRY AGAIN", "WALLET", "Not connected"}
+cands = [t for t in texts if t not in skip]
+print(cands[0] if cands else "")
+PY
+)"
+    fi
+    if [ -n "$msg" ]; then
+      vr1="FAIL(connect cannot complete on the sealed build — app Error state, verbatim: '$msg'; no crash, process alive, no sheet ever presented)"
+    else
+      vr1="FAIL(no mock approval sheet; post-tap state=$st2)"
+    fi
     capture_window "vr1"
     return
   fi
@@ -662,7 +709,10 @@ cell_vr7() {
   dump_ui "$TMPD/vr7-dis.xml" || true
   tap_text "$TMPD/vr7-dis.xml" "CONNECT WALLET" || tap_text "$TMPD/vr7-dis.xml" "TRY AGAIN" || { vr7="FAIL(no connect control)"; return; }
   local f="$OUT/hier-vr7-sheet.xml"
-  if ! wait_sheet "$f" 45; then vr7="FAIL(no mock sheet)"; capture_window "vr7"; return; fi
+  if ! wait_sheet "$f" 45; then
+    if identity_wall; then vr7="NOT-RUN(authorize sheet unreachable — connect fails client-side on the sealed build (iconRelativeUri identity rejection, see VR-1); decline-at-sheet cannot be exercised)"; else vr7="FAIL(no mock sheet)"; fi
+    capture_window "vr7"; return
+  fi
   tap_exact "$f" "Cancel" || { vr7="FAIL(no Cancel on authorize sheet)"; capture_window "vr7"; return; }
   log "vr7: declined at the authorize sheet"
   sleep 5
@@ -699,7 +749,10 @@ cell_vr8() {
   dump_ui "$TMPD/vr8-dis.xml" || true
   tap_text "$TMPD/vr8-dis.xml" "CONNECT WALLET" || tap_text "$TMPD/vr8-dis.xml" "TRY AGAIN" || { vr8="FAIL(no connect control)"; return; }
   local f="$OUT/hier-vr8-sheet.xml"
-  if ! wait_sheet "$f" 45; then vr8="NOT-RUN(connect sheet never appeared; nothing to interrupt)"; capture_window "vr8"; return; fi
+  if ! wait_sheet "$f" 45; then
+    if identity_wall; then vr8="NOT-RUN(connect sheet unreachable — connect fails client-side on the sealed build (iconRelativeUri identity rejection, see VR-1); nothing to interrupt)"; else vr8="NOT-RUN(connect sheet never appeared; nothing to interrupt)"; fi
+    capture_window "vr8"; return
+  fi
   log "vr8: sheet up; force-stopping the wallet NOW"
   adb shell am force-stop "$MOCK" >/dev/null 2>&1 || true
   sleep 3
@@ -736,7 +789,10 @@ cell_vr8() {
 # --- VR-13: wallet process death mid-session -------------------------------------------
 cell_vr13() {
   log "=== VR-13 wallet death mid-session ==="
-  if ! ensure_connected "vr13-setup"; then vr13="NOT-RUN(could not establish a session)"; return; fi
+  if ! ensure_connected "vr13-setup"; then
+    if identity_wall; then vr13="NOT-RUN(no session can be established on the sealed build — connect fails client-side (iconRelativeUri identity rejection, see VR-1))"; else vr13="NOT-RUN(could not establish a session)"; fi
+    return
+  fi
   log "vr13: session live; killing wallet process (am kill — background death, not force-stop)"
   adb shell am kill "$MOCK" >/dev/null 2>&1 || true
   sleep 2
@@ -793,7 +849,10 @@ cell_vr12() {
   dump_ui "$TMPD/vr12-dis.xml" || true
   tap_text "$TMPD/vr12-dis.xml" "CONNECT WALLET" || tap_text "$TMPD/vr12-dis.xml" "TRY AGAIN" || { vr12="FAIL(no connect control)"; return; }
   local f="$OUT/hier-vr12-sheet.xml"
-  if ! wait_sheet "$f" 45; then vr12="NOT-RUN(no sheet to background)"; capture_window "vr12"; return; fi
+  if ! wait_sheet "$f" 45; then
+    if identity_wall; then vr12="NOT-RUN(no sheet to background — connect fails client-side on the sealed build (iconRelativeUri identity rejection, see VR-1))"; else vr12="NOT-RUN(no sheet to background)"; fi
+    capture_window "vr12"; return
+  fi
   log "vr12: sheet up; sending HOME (backgrounding both tasks)"
   adb shell input keyevent 3 >/dev/null 2>&1 || true
   sleep 3
@@ -897,6 +956,8 @@ cell_vr11() {
   capture_window "vr11"
   if [ "$compact" = "PASS" ] && [ "$settings_clean" = "yes" ]; then
     vr11="PASS(wallet functions exercised from the WALLET destination (connect+sign+disconnect); HOME/SETTINGS expose no wallet controls; GAME destination wallet taps NOT-RUN — bridge lives inside the WebView, a single accessibility node not reachable by the harness, and its sign paths need the gated paid flow)"
+  elif identity_wall; then
+    vr11="FAIL(registry assertions held — HOME/SETTINGS expose no wallet controls, GAME is a single WebView node — but the WALLET destination's connect fails client-side on the sealed build (iconRelativeUri identity rejection, see VR-1); compact pass impossible)"
   else
     vr11="FAIL(compact wallet pass=$compact, settings_clean=$settings_clean)"
   fi
