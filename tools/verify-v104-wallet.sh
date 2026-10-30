@@ -21,6 +21,12 @@
 # features and data' keyguard presentation the r5 triggers missed
 # (structural detection in looks_locked + authenticate relaunch).
 #
+# Driver r8 (v1.0.5 re-run): VR-12 returns via the WALLET's recents
+# card (labels are content-desc on API 36; r1 blind-tapped the dApp
+# card and mis-graded a waiting app as 'hung'), and VR-11 starts
+# from a clean process so a prior cell's pending session cannot
+# poison its compact pass.
+#
 # Any AndroidRuntime FATAL (either package) or any IllegalStateException
 # in a captured logcat window is counted and fails the whole verdict.
 set -u
@@ -87,6 +93,22 @@ tap_text() { # $1 = hierarchy file, $2 = substring
 import re, sys
 data = open(sys.argv[1], encoding="utf-8", errors="ignore").read()
 for m in re.finditer(r'text="([^"]*' + re.escape(sys.argv[2]) + r'[^"]*)"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', data):
+    x = (int(m.group(2)) + int(m.group(4))) // 2
+    y = (int(m.group(3)) + int(m.group(5))) // 2
+    print(f"{x} {y}")
+    break
+PY
+)"
+  if [ -n "$coords" ]; then adb shell input tap $coords; return 0; fi
+  return 1
+}
+
+tap_desc() { # $1 = hierarchy file, $2 = substring matched against content-desc
+  local coords
+  coords="$(python3 - "$1" "$2" <<'PY'
+import re, sys
+data = open(sys.argv[1], encoding="utf-8", errors="ignore").read()
+for m in re.finditer(r'content-desc="([^"]*' + re.escape(sys.argv[2]) + r'[^"]*)"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', data):
     x = (int(m.group(2)) + int(m.group(4))) // 2
     y = (int(m.group(3)) + int(m.group(5))) // 2
     print(f"{x} {y}")
@@ -937,12 +959,19 @@ cell_vr12() {
   adb shell input keyevent 187 >/dev/null 2>&1 || true  # APP_SWITCH / recents
   sleep 3
   dump_ui "$OUT/hier-vr12-recents.xml" || true
-  # Return via the recents card (wallet or dApp — both resume the flow).
-  if tap_text "$OUT/hier-vr12-recents.xml" "VOIDRUNNER" || tap_text "$OUT/hier-vr12-recents.xml" "VRTestWallet" || tap_text "$OUT/hier-vr12-recents.xml" "Mock"; then
-    log "vr12: tapped a recents card"
+  # Return via the recents card. API 36's recents labels live in
+  # content-desc, NOT text — r1 reported 'no labelled card' while a
+  # 'Mock MWA Wallet' card sat in its own dump, then blind-tapped the
+  # dApp card and graded the app 'hung' for waiting on an approval
+  # that sat untouched in the wallet's task (driver r8 fix). Match
+  # both attributes, WALLET card first: the approval flow lives in
+  # the wallet's task; foregrounding the dApp alone leaves it at
+  # 'Waiting for wallet' by design.
+  if tap_desc "$OUT/hier-vr12-recents.xml" "Mock MWA Wallet" || tap_text "$OUT/hier-vr12-recents.xml" "Mock" || tap_desc "$OUT/hier-vr12-recents.xml" "VOIDRUNNER" || tap_text "$OUT/hier-vr12-recents.xml" "VOIDRUNNER"; then
+    log "vr12: tapped a recents card (wallet first)"
   else
-    tap_frac 0.5 0.35
-    log "vr12: no labelled card found; tapped centre card position"
+    adb shell am start -W -n "$MOCK_ACT" >/dev/null 2>&1 || true
+    log "vr12: no labelled card matched; brought the wallet task forward via am start"
   fi
   sleep 3
   local result="unknown"
@@ -953,6 +982,11 @@ cell_vr12() {
     satisfy_auth_prompt || true
     if [ "$(vr_state "$TMPD/vr12-st.xml")" = "connected" ]; then result="completed"; fi
   else
+    # No sheet in the returned dump — read the state on the DAPP's own
+    # surface (bring it forward first; the foreground may still be
+    # the wallet's main screen, whose state is not the app's).
+    adb shell am start -W -n "$ACT" >/dev/null 2>&1 || true
+    sleep 2
     local st; st="$(vr_state "$TMPD/vr12-st2.xml")"
     log "vr12: post-foreground state=$st (fg=$(fg_pkg))"
     if [ "$st" = "connected" ]; then result="completed"
@@ -977,6 +1011,13 @@ cell_vr12() {
 # --- VR-11: entry points / destination registry ------------------------------------------
 cell_vr11() {
   log "=== VR-11 entry points (NavHost destination registry) ==="
+  # r8: start from a clean process — a prior cell's pending session
+  # (VR-12's backgrounded, never-approved sheet in r1) otherwise
+  # poisons the compact pass: the wallet screen sits in 'Waiting for
+  # wallet' with no connect control to tap, and the mock still holds
+  # the old sheet open in its own task.
+  adb shell am force-stop "$PKG" >/dev/null 2>&1 || true
+  sleep 1
   # Registry of record (MainActivity.kt): splash -> home { PLAY->game,
   # WALLET->wallet, SETTINGS->settings }. Wallet controls exist natively
   # ONLY on the wallet destination; the game destination reaches the
