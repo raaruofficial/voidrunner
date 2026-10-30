@@ -41,6 +41,19 @@ class MainActivity : ComponentActivity() {
     lateinit var activityResultSender: ActivityResultSender
         private set
 
+    override fun onResume() {
+        super.onResume()
+        // KFC-008 foreground reconciliation (v1.0.7): if a wallet request
+        // is still pending when the app returns to the foreground, the
+        // wallet interaction ended without delivering a result (the
+        // approval was abandoned) — WalletManager resolves it after a
+        // short grace window instead of leaving the UI on "Waiting for
+        // wallet…" forever. See WalletManager.onReturnedToForeground for
+        // the full reasoning. No request is ever pending at first
+        // launch, so the launch-time onResume is a no-op.
+        (application as VoidrunnerApp).walletManager.onReturnedToForeground()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         activityResultSender = ActivityResultSender(this)
