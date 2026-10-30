@@ -16,6 +16,11 @@
 # VR-5/VR-10 sign-and-send — bridge-only, behind the gated game flow)
 # are graded by the report, not by this driver.
 #
+# Driver r7 (v1.0.5 re-run): keyguard detection broadened — v105 r1
+# starved both core jobs behind an all-SystemUI 'Unlock for all
+# features and data' keyguard presentation the r5 triggers missed
+# (structural detection in looks_locked + authenticate relaunch).
+#
 # Any AndroidRuntime FATAL (either package) or any IllegalStateException
 # in a captured logcat window is counted and fails the whole verdict.
 set -u
@@ -229,18 +234,50 @@ adb shell settings put secure lock_screen_lock_after_timeout 2147483647 >/dev/nu
 adb shell svc power stayon usb >/dev/null 2>&1 || true
 log "security: lock mitigation applied (screen_off_timeout=max, lock_after_timeout=max, stayon usb)"
 
+looks_locked() { # $1 = dump file; keyguard/AOD heuristics (driver r7)
+  # v105 r1 starved BOTH core jobs behind a keyguard presentation the
+  # r5 triggers missed: an all-SystemUI hierarchy whose only texts are
+  # the clock, carrier and 'Unlock for all features and data' — no
+  # 'Swipe up to open' string, and fg_pkg's focus parse never yielded
+  # 'com.android.systemui'. Detect the state structurally instead.
+  python3 - "$1" <<'PY'
+import re, sys
+try:
+    data = open(sys.argv[1], encoding="utf-8", errors="ignore").read()
+except OSError:
+    sys.exit(1)
+pkgs = set(re.findall(r'package="([^"]+)"', data))
+texts = " ".join(re.findall(r'text="([^"]*)"', data))
+if "Unlock for all features and data" in texts: sys.exit(0)
+if "Swipe up to open" in texts or "Swipe up to unlock" in texts: sys.exit(0)
+if pkgs and pkgs <= {"com.android.systemui"}: sys.exit(0)
+sys.exit(1)
+PY
+}
+
 ensure_unlocked() {
-  local f="$TMPD/lock.xml"
-  if dump_ui "$f" && { grep -qE "Swipe up to open|Swipe up to unlock" "$f" || [ "$(fg_pkg)" = "com.android.systemui" ]; }; then
-    log "lock: keyguard appears engaged (fg=$(fg_pkg)); waking + PIN unlock"
-    adb shell input keyevent 82 >/dev/null 2>&1 || true
+  local f="$TMPD/lock.xml" try
+  dump_ui "$f" || return 0
+  if ! looks_locked "$f" && [ "$(fg_pkg)" != "com.android.systemui" ]; then return 0; fi
+  for try in 1 2 3; do
+    log "lock: keyguard appears engaged (try $try; fg=$(fg_pkg)); wake + swipe + PIN unlock"
+    adb shell input keyevent 224 >/dev/null 2>&1 || true  # WAKEUP
     sleep 1
-    adb shell input swipe 540 2000 540 800 250 >/dev/null 2>&1 || true
+    adb shell input keyevent 82 >/dev/null 2>&1 || true   # MENU — dismisses AOD on some images
     sleep 1
-    adb shell input text "$DEVICE_PIN" >/dev/null 2>&1 || true
-    adb shell input keyevent 66 >/dev/null 2>&1 || true
-    sleep 2
-  fi
+    adb shell input swipe 540 2200 540 700 300 >/dev/null 2>&1 || true
+    sleep 1
+    # Send the PIN only if the post-swipe surface still looks like a
+    # credential gate (never type blindly into an unlocked UI).
+    if dump_ui "$f" && looks_locked "$f"; then
+      adb shell input text "$DEVICE_PIN" >/dev/null 2>&1 || true
+      adb shell input keyevent 66 >/dev/null 2>&1 || true
+      sleep 2
+    fi
+    dump_ui "$f" || return 0
+    if ! looks_locked "$f"; then log "lock: unlocked on try $try"; return 0; fi
+  done
+  log "lock: STILL LOCKED after 3 unlock attempts"
 }
 
 enroll_fingerprint() {
@@ -336,6 +373,16 @@ authenticate_mock() {
   sleep 3
   local f="$TMPD/mock-main.xml"
   dump_ui "$f" || return 1
+  if ! grep -q "AUTHENTICATE\|Authenticate" "$f" && looks_locked "$f"; then
+    # r7: the launch can land behind an engaged keyguard (v105 r1) —
+    # the first dump then shows the lock screen, not the mock. Unlock
+    # and relaunch once before concluding the button is absent.
+    log "auth: mock launch landed behind the keyguard — unlocking + relaunching"
+    ensure_unlocked
+    adb shell am start -W -n "$MOCK_ACT" >/dev/null 2>&1 || true
+    sleep 3
+    dump_ui "$f" || return 1
+  fi
   grep -oE 'text="[^"]+"' "$f" | sort -u | head -12 | tee -a "$LANE_LOG" || true
   # The button's dump text is 'AUTHENTICATE' (Material all-caps) — r3
   # searched for 'Authenticate' and missed a healthy mock main screen
