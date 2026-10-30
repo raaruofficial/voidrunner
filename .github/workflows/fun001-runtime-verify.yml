@@ -1,7 +1,8 @@
-name: FUN-001 runtime verify (cured v1.0.5)
+name: FUN-001 runtime verify (cured v1.0.6)
 
-# v1.0.5 verification lane — the v1.0.4 §2.2 verdict re-run against
-# the icon/WebView-cured binary (commit 5bc47c2). Two families, one dispatchable file (a
+# v1.0.6 verification lane — the FULL §2.2 candidate-verdict run against
+# the sealed v1.0.6 binary (commit 90c5131: v1.0.5 + KFC-006 Base58
+# codec cure only). Two families, one dispatchable file (a
 # workflow_dispatch file must exist on the DEFAULT branch to run at
 # all; new workflow files on a side branch return 404 — so both
 # families live here and are selected with the `target` input; runs
@@ -26,6 +27,10 @@ name: FUN-001 runtime verify (cured v1.0.5)
 #     alone did not take on the first attempt — AVD booted at ~4 GB —
 #     so -memory 1024 is passed explicitly and device-info meminfo
 #     records what actually ran).
+#   battery-sweep-api36 / battery-sweep-api35 — fresh-install first
+#     launch + full menu sweep (phases A+B, REPORT.md method) on each
+#     AVD, standard RAM; the v1.0.6 candidate verdict requires the
+#     battery on THIS binary, not the subsumed v1.0.3 matrix.
 #
 # The original brief's no-wallet launch/sweep/connect-tap matrix ran
 # 2026-10-29 (run 40953755735: kill cell PASS, API 28 span PASS; the
@@ -33,8 +38,8 @@ name: FUN-001 runtime verify (cured v1.0.5)
 # app signals clean) and is SUBSUMED by VR-1/VR-11; it is not re-run.
 #
 # Every job is its own runner (the v1.0.3 combined matrix starved).
-# Every job hash-gates the sealed artefact (Android CI 40976290320,
-# artefact 12942762421, sha256 ba5ea258...366) before any install.
+# Every job hash-gates the sealed artefact (Android CI 40984783576,
+# artefact 12945989433, sha256 3163fa1b...f5c1) before any install.
 
 on:
   workflow_dispatch:
@@ -54,9 +59,9 @@ permissions:
   actions: read
 
 env:
-  ARTEFACT_ID: "12942762421"
-  EXPECTED_SHA256: "ba5ea258e019bbe9db3e83c9ad8dd9d871dfa3833e180232c667d13d1f7fb366"
-  VERSION_STAMP: "v1.0.5 (5)"
+  ARTEFACT_ID: "12945989433"
+  EXPECTED_SHA256: "3163fa1bb48020d094f7f08504a447298bdd878c2f920451abb4ff973b86f5c1"
+  VERSION_STAMP: "v1.0.6 (6)"
 
 jobs:
   # ---------------------------------------------------------------- wallet
@@ -142,12 +147,12 @@ jobs:
           sudo udevadm trigger --name-match=kvm
           ls -la /dev/kvm
 
-      - name: Download v1.0.5 artefact by id and verify its hash
+      - name: Download v1.0.6 artefact by id and verify its hash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          mkdir -p artefact fun001-v105-battery-webview
+          mkdir -p artefact fun001-v106-battery-webview
           gh api "repos/${{ github.repository }}/actions/artifacts/${ARTEFACT_ID}/zip" > artefact.zip
           unzip -o artefact.zip -d artefact
           ls -la artefact
@@ -156,7 +161,7 @@ jobs:
             echo "artefact_id=${ARTEFACT_ID}"
             echo "expected_sha256=${EXPECTED_SHA256}"
             echo "actual_sha256=${ACTUAL}"
-          } | tee fun001-v105-battery-webview/hash-verification.txt
+          } | tee fun001-v106-battery-webview/hash-verification.txt
           if [ "$ACTUAL" != "$EXPECTED_SHA256" ]; then
             echo "HASH MISMATCH — lane aborts before install"
             exit 1
@@ -170,18 +175,18 @@ jobs:
           target: google_apis
           arch: x86_64
           profile: pixel_7_pro
-          avd-name: v105-webview
+          avd-name: v106-webview
           force-avd-creation: true
           emulator-boot-timeout: 1200
           emulator-options: -no-window
-          script: APK_PATH=$PWD/artefact/app-release.apk FUN001_OUT=$PWD/fun001-v105-battery-webview FUN001_PHASES=AC FUN001_VERSION_STAMP='${{ env.VERSION_STAMP }}' bash tools/verify-fun001.sh
+          script: APK_PATH=$PWD/artefact/app-release.apk FUN001_OUT=$PWD/fun001-v106-battery-webview FUN001_PHASES=AC FUN001_VERSION_STAMP='${{ env.VERSION_STAMP }}' bash tools/verify-fun001.sh
 
       - name: Upload battery-webview evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: fun001-v105-battery-webview
-          path: fun001-v105-battery-webview/
+          name: fun001-v106-battery-webview
+          path: fun001-v106-battery-webview/
           retention-days: 90
           if-no-files-found: warn
 
@@ -206,12 +211,12 @@ jobs:
           sudo udevadm trigger --name-match=kvm
           ls -la /dev/kvm
 
-      - name: Download v1.0.5 artefact by id and verify its hash
+      - name: Download v1.0.6 artefact by id and verify its hash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          mkdir -p artefact fun001-v105-battery-lowram
+          mkdir -p artefact fun001-v106-battery-lowram
           gh api "repos/${{ github.repository }}/actions/artifacts/${ARTEFACT_ID}/zip" > artefact.zip
           unzip -o artefact.zip -d artefact
           ls -la artefact
@@ -220,7 +225,7 @@ jobs:
             echo "artefact_id=${ARTEFACT_ID}"
             echo "expected_sha256=${EXPECTED_SHA256}"
             echo "actual_sha256=${ACTUAL}"
-          } | tee fun001-v105-battery-lowram/hash-verification.txt
+          } | tee fun001-v106-battery-lowram/hash-verification.txt
           if [ "$ACTUAL" != "$EXPECTED_SHA256" ]; then
             echo "HASH MISMATCH — lane aborts before install"
             exit 1
@@ -234,18 +239,146 @@ jobs:
           target: google_apis
           arch: x86_64
           profile: pixel_7_pro
-          avd-name: v105-lowram
+          avd-name: v106-lowram
           force-avd-creation: true
           emulator-boot-timeout: 1200
           ram-size: 1024
           emulator-options: -no-window -memory 1024
-          script: APK_PATH=$PWD/artefact/app-release.apk FUN001_OUT=$PWD/fun001-v105-battery-lowram FUN001_PHASES=AB FUN001_VERSION_STAMP='${{ env.VERSION_STAMP }}' bash tools/verify-fun001.sh
+          script: APK_PATH=$PWD/artefact/app-release.apk FUN001_OUT=$PWD/fun001-v106-battery-lowram FUN001_PHASES=AB FUN001_VERSION_STAMP='${{ env.VERSION_STAMP }}' bash tools/verify-fun001.sh
 
       - name: Upload battery-lowram evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: fun001-v105-battery-lowram
-          path: fun001-v105-battery-lowram/
+          name: fun001-v106-battery-lowram
+          path: fun001-v106-battery-lowram/
+          retention-days: 90
+          if-no-files-found: warn
+
+  battery-sweep-api36:
+    name: battery — first launch + menu sweep (API 36)
+    if: ${{ inputs.target == 'battery' || inputs.target == 'everything' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Check out repository (lane files only)
+        uses: actions/checkout@v4
+
+      - name: Install emulator runtime libraries
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libpulse0 libgl1 libegl1 libnss3 libxcb-cursor0 > /dev/null
+
+      - name: Enable KVM group permissions
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -la /dev/kvm
+
+      - name: Download v1.0.6 artefact by id and verify its hash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p artefact fun001-v106-battery-sweep-api36
+          gh api "repos/${{ github.repository }}/actions/artifacts/${ARTEFACT_ID}/zip" > artefact.zip
+          unzip -o artefact.zip -d artefact
+          ls -la artefact
+          ACTUAL="$( (sha256sum artefact/app-release.apk 2>/dev/null || shasum -a 256 artefact/app-release.apk) | awk '{print $1}')"
+          {
+            echo "artefact_id=${ARTEFACT_ID}"
+            echo "expected_sha256=${EXPECTED_SHA256}"
+            echo "actual_sha256=${ACTUAL}"
+          } | tee fun001-v106-battery-sweep-api36/hash-verification.txt
+          if [ "$ACTUAL" != "$EXPECTED_SHA256" ]; then
+            echo "HASH MISMATCH — lane aborts before install"
+            exit 1
+          fi
+          echo "Hash verified byte-for-byte; proceeding to cold run."
+
+      - name: First launch + menu sweep on API 36 (phases A+B)
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 36
+          target: google_apis
+          arch: x86_64
+          profile: pixel_7_pro
+          avd-name: v106-sweep36
+          force-avd-creation: true
+          emulator-boot-timeout: 1200
+          emulator-options: -no-window
+          script: APK_PATH=$PWD/artefact/app-release.apk FUN001_OUT=$PWD/fun001-v106-battery-sweep-api36 FUN001_PHASES=AB FUN001_VERSION_STAMP='${{ env.VERSION_STAMP }}' bash tools/verify-fun001.sh
+
+      - name: Upload battery-sweep-api36 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fun001-v106-battery-sweep-api36
+          path: fun001-v106-battery-sweep-api36/
+          retention-days: 90
+          if-no-files-found: warn
+
+  battery-sweep-api35:
+    name: battery — first launch + menu sweep (API 35)
+    if: ${{ inputs.target == 'battery' || inputs.target == 'everything' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Check out repository (lane files only)
+        uses: actions/checkout@v4
+
+      - name: Install emulator runtime libraries
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libpulse0 libgl1 libegl1 libnss3 libxcb-cursor0 > /dev/null
+
+      - name: Enable KVM group permissions
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -la /dev/kvm
+
+      - name: Download v1.0.6 artefact by id and verify its hash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p artefact fun001-v106-battery-sweep-api35
+          gh api "repos/${{ github.repository }}/actions/artifacts/${ARTEFACT_ID}/zip" > artefact.zip
+          unzip -o artefact.zip -d artefact
+          ls -la artefact
+          ACTUAL="$( (sha256sum artefact/app-release.apk 2>/dev/null || shasum -a 256 artefact/app-release.apk) | awk '{print $1}')"
+          {
+            echo "artefact_id=${ARTEFACT_ID}"
+            echo "expected_sha256=${EXPECTED_SHA256}"
+            echo "actual_sha256=${ACTUAL}"
+          } | tee fun001-v106-battery-sweep-api35/hash-verification.txt
+          if [ "$ACTUAL" != "$EXPECTED_SHA256" ]; then
+            echo "HASH MISMATCH — lane aborts before install"
+            exit 1
+          fi
+          echo "Hash verified byte-for-byte; proceeding to cold run."
+
+      - name: First launch + menu sweep on API 35 (phases A+B)
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_7_pro
+          avd-name: v106-sweep35
+          force-avd-creation: true
+          emulator-boot-timeout: 1200
+          emulator-options: -no-window
+          script: APK_PATH=$PWD/artefact/app-release.apk FUN001_OUT=$PWD/fun001-v106-battery-sweep-api35 FUN001_VERSION_STAMP='${{ env.VERSION_STAMP }}' bash tools/verify-fun001.sh
+
+      - name: Upload battery-sweep-api35 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fun001-v106-battery-sweep-api35
+          path: fun001-v106-battery-sweep-api35/
           retention-days: 90
           if-no-files-found: warn
