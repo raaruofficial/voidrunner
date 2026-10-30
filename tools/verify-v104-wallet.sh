@@ -27,6 +27,15 @@
 # from a clean process so a prior cell's pending session cannot
 # poison its compact pass.
 #
+# Driver r10 (v1.0.7 verdict): VR-3 sign runs TWICE per core suite
+# (vr3_attempt, tags vr3/vr3b); connect completion accepts BOTH paths
+# — approval sheet or silent reauthorize via a live cached authToken
+# (tap_connect_and_complete; the r9 sheet-only probes timed out on
+# the silent path and starved VR-9 / misread VR-13's reconnect);
+# VR-12 polls the post-return state for up to 30 s and records the
+# resolution + latency (vr12-notes.txt), then proves the retry
+# affordance recovers the flow.
+#
 # Any AndroidRuntime FATAL (either package) or any IllegalStateException
 # in a captured logcat window is counted and fails the whole verdict.
 set -u
@@ -508,14 +517,47 @@ approve_connect_sheet() { # $1 = evidence tag
   return 1
 }
 
+state_of() { # echoes the wallet-screen state keyword read from a GIVEN dump file
+  if grep -q "$EXPECTED_PUBKEY" "$1" && grep -q "CONNECTED" "$1"; then echo "connected"
+  elif grep -q "CONNECT WALLET" "$1"; then echo "disconnected"
+  elif grep -q "TRY AGAIN" "$1"; then echo "error"
+  elif grep -q "Waiting for wallet" "$1"; then echo "working"
+  else echo "unknown"; fi
+}
+
 vr_state() { # echoes the wallet-screen state keyword from a fresh dump: $1 = dump file
-  if dump_ui "$1"; then
-    if grep -q "$EXPECTED_PUBKEY" "$1" && grep -q "CONNECTED" "$1"; then echo "connected"
-    elif grep -q "CONNECT WALLET" "$1"; then echo "disconnected"
-    elif grep -q "TRY AGAIN" "$1"; then echo "error"
-    elif grep -q "Waiting for wallet" "$1"; then echo "working"
-    else echo "unknown"; fi
-  else echo "nodump"; fi
+  if dump_ui "$1"; then state_of "$1"; else echo "nodump"; fi
+}
+
+tap_connect_and_complete() { # $1 = evidence tag; from the wallet screen in a
+  # disconnected/Error state: tap the connect control and accept EITHER
+  # completion path — an approval sheet (fresh authorize) or a silent
+  # reauthorize (a live cached authToken completes the transact with no
+  # sheet at all). The r9 sheet-only probes timed out on the silent path
+  # (VR-9 setup, VR-13 reconnect). Files hier-<tag>-sheet.xml when a
+  # sheet appeared and hier-<tag>-after.xml with the final state dump.
+  local tag="$1" elapsed=0
+  dump_ui "$TMPD/tcc-pre.xml" || return 1
+  tap_text "$TMPD/tcc-pre.xml" "TRY AGAIN" || tap_text "$TMPD/tcc-pre.xml" "CONNECT WALLET" || return 1
+  while [ "$elapsed" -lt 45 ]; do
+    if dump_ui "$TMPD/tcc-poll.xml"; then
+      if sheet_present "$TMPD/tcc-poll.xml"; then
+        cp "$TMPD/tcc-poll.xml" "$OUT/hier-$tag-sheet.xml"
+        snap "shot-$tag-sheet.png"
+        log "$tag: approval sheet appeared; approving"
+        tap_exact "$OUT/hier-$tag-sheet.xml" "Connect" || tap_text "$OUT/hier-$tag-sheet.xml" "Connect" || return 1
+        sleep 4
+        satisfy_auth_prompt || true
+        break
+      fi
+      if [ "$(fg_pkg)" = "$PKG" ] && [ "$(state_of "$TMPD/tcc-poll.xml")" = "connected" ]; then
+        log "$tag: connect completed by silent reauthorize (no sheet)"
+        break
+      fi
+    fi
+    sleep 3; elapsed=$((elapsed + 3))
+  done
+  wait_for "CONNECTED" 30 "$OUT/hier-$tag-after.xml" && grep -q "$EXPECTED_PUBKEY" "$OUT/hier-$tag-after.xml"
 }
 
 # --- shared flows -------------------------------------------------------------------
@@ -549,10 +591,12 @@ ensure_connected() { # $1 = evidence tag
   goto_wallet || return 1
   if [ "$(vr_state "$TMPD/ec.xml")" = "connected" ]; then return 0; fi
   auth_fresh_enough
-  dump_ui "$TMPD/ec2.xml" || return 1
-  tap_text "$TMPD/ec2.xml" "CONNECT WALLET" || tap_text "$TMPD/ec2.xml" "TRY AGAIN" || return 1
-  approve_connect_sheet "$tag" || return 1
-  wait_for "CONNECTED" 30 "$OUT/hier-$tag-connected.xml" && grep -q "$EXPECTED_PUBKEY" "$OUT/hier-$tag-connected.xml"
+  # r10: a connect with a live cached authToken completes WITHOUT a
+  # sheet (silent reauthorize) — r9's sheet-only probe waited 45 s for
+  # a sheet that never came and starved VR-9 on exactly that, although
+  # the session was live. tap_connect_and_complete accepts either
+  # completion path (sheet approval or silent reauthorize).
+  tap_connect_and_complete "$tag"
 }
 
 ensure_disconnected() {
@@ -619,43 +663,52 @@ PY
 }
 
 # --- VR-3: sign message (+ opportunistic off-device signature verification) ---------
-cell_vr3() {
-  log "=== VR-3 sign message ==="
-  if [ "$(vr_state "$TMPD/vr3-pre.xml")" != "connected" ]; then
-    vr3="NOT-RUN(not connected at cell start)"
-    return
+# r10: the sign runs TWICE per core suite (v1.0.7 verdict tasking —
+# repeat x2 per API). vr3_attempt <tag> executes one full sign and sets
+# VR3_ATTEMPT_GRADE / VR3_ATTEMPT_VERIFIED; the first attempt keeps the
+# r9 evidence names (hier-vr3-after.xml, logcat-vr3.txt, vr3-notes.txt),
+# the second files under vr3b.
+VR3_ATTEMPT_GRADE="NOT-RUN"; VR3_ATTEMPT_VERIFIED="not-observed"
+vr3_attempt() {
+  local tag="$1"
+  VR3_ATTEMPT_GRADE="NOT-RUN"; VR3_ATTEMPT_VERIFIED="not-observed"
+  log "=== VR-3 sign attempt ($tag) ==="
+  if [ "$(vr_state "$TMPD/$tag-pre.xml")" != "connected" ]; then
+    VR3_ATTEMPT_GRADE="NOT-RUN(not connected at attempt start)"
+    log "$tag: $VR3_ATTEMPT_GRADE"
+    return 1
   fi
   auth_fresh_enough
   adb logcat -c >/dev/null 2>&1 || true
-  dump_ui "$TMPD/vr3-conn.xml" || true
-  tap_text "$TMPD/vr3-conn.xml" "SIGN TEST MESSAGE" || { vr3="FAIL(no sign control in Connected state)"; return; }
-  local f="$OUT/hier-vr3-sheet.xml"
+  dump_ui "$TMPD/$tag-conn.xml" || true
+  tap_text "$TMPD/$tag-conn.xml" "SIGN TEST MESSAGE" || { VR3_ATTEMPT_GRADE="FAIL(no sign control in Connected state)"; return 1; }
+  local f="$OUT/hier-$tag-sheet.xml"
   if ! wait_sheet "$f" 45; then
-    vr3="FAIL(no mock sign sheet)"
-    capture_window "vr3"
-    return
+    VR3_ATTEMPT_GRADE="FAIL(no mock sign sheet)"
+    capture_window "$tag"
+    return 1
   fi
-  snap "shot-vr3-sheet.png"
+  snap "shot-$tag-sheet.png"
   if grep -q "VOIDRUNNER sign-in" "$f"; then
-    log "vr3: sign sheet shows the request message 'VOIDRUNNER sign-in'"
+    log "$tag: sign sheet shows the request message 'VOIDRUNNER sign-in'"
   else
-    log "vr3: sheet present but message text not visible in dump"
+    log "$tag: sheet present but message text not visible in dump"
   fi
   if grep -qi "wants to connect" "$f"; then
-    log "vr3: NOTE — an authorize sheet appeared during transact (reauthorize NOT silent)"
-    echo "reauthorize_during_transact=sheet-appeared" >> "$OUT/vr3-notes.txt"
+    log "$tag: NOTE — an authorize sheet appeared during transact (reauthorize NOT silent)"
+    echo "reauthorize_during_transact=sheet-appeared" >> "$OUT/$tag-notes.txt"
   else
-    echo "reauthorize_during_transact=silent (sign sheet only; cached authToken reused)" >> "$OUT/vr3-notes.txt"
+    echo "reauthorize_during_transact=silent (sign sheet only; cached authToken reused)" >> "$OUT/$tag-notes.txt"
   fi
-  tap_exact "$f" "Approve" || { vr3="FAIL(no Approve on sign sheet)"; capture_window "vr3"; return; }
+  tap_exact "$f" "Approve" || { VR3_ATTEMPT_GRADE="FAIL(no Approve on sign sheet)"; capture_window "$tag"; return 1; }
   sleep 3
   satisfy_auth_prompt || true
   local ok="0"
-  if wait_for "CONNECTED" 30 "$OUT/hier-vr3-after.xml" && grep -q "$EXPECTED_PUBKEY" "$OUT/hier-vr3-after.xml"; then ok="1"; fi
-  capture_window "vr3"
+  if wait_for "CONNECTED" 30 "$OUT/hier-$tag-after.xml" && grep -q "$EXPECTED_PUBKEY" "$OUT/hier-$tag-after.xml"; then ok="1"; fi
+  capture_window "$tag"
   # Opportunistic: hunt the returned signature in the captured logcat window
   # (walletlib/clientlib debug lines) and verify it off-device with node.
-  python3 - "$OUT/logcat-vr3.txt" "$EXPECTED_PUBKEY" > "$OUT/vr3-sig-candidates.txt" <<'PY' || true
+  python3 - "$OUT/logcat-$tag.txt" "$EXPECTED_PUBKEY" > "$OUT/$tag-sig-candidates.txt" <<'PY' || true
 import re, sys
 data = open(sys.argv[1], encoding="utf-8", errors="ignore").read()
 cands = sorted(set(re.findall(r'[1-9A-HJ-NP-Za-km-z]{86,88}', data)))
@@ -664,7 +717,7 @@ for c in cands:
         print(c)
 PY
   local verified="not-observed"
-  if [ -s "$OUT/vr3-sig-candidates.txt" ]; then
+  if [ -s "$OUT/$tag-sig-candidates.txt" ]; then
     while read -r cand; do
       if node -e '
         const c = require("crypto");
@@ -678,18 +731,46 @@ PY
         verified="VERIFIED off-device (candidate $cand from logcat window)"
         break
       fi
-    done < "$OUT/vr3-sig-candidates.txt"
+    done < "$OUT/$tag-sig-candidates.txt"
   fi
-  echo "vr3_signature_verification=$verified" >> "$OUT/vr3-notes.txt"
-  log "vr3: signature verification: $verified"
+  VR3_ATTEMPT_VERIFIED="$verified"
+  echo "vr3_signature_verification=$verified" >> "$OUT/$tag-notes.txt"
+  log "$tag: signature verification: $verified"
   if [ "$ok" = "1" ]; then
     if [ "$verified" != "not-observed" ]; then
-      vr3="PASS(approval → signature returned, verified off-device against imported key; session restored)"
+      VR3_ATTEMPT_GRADE="PASS(approval → signature returned, verified off-device against imported key; session restored)"
     else
-      vr3="PASS(functional: approval → clientlib Success → Connected restored; signature value not exposed on any harness-observable surface of the sealed build — off-device verification sub-step NOT-RUN, see vr3-notes.txt)"
+      VR3_ATTEMPT_GRADE="PASS(functional: approval → clientlib Success → Connected restored; signature value not exposed on any harness-observable surface of the sealed build — off-device verification sub-step NOT-RUN, see $tag-notes.txt)"
     fi
+    log "$tag: $VR3_ATTEMPT_GRADE"
+    return 0
+  fi
+  VR3_ATTEMPT_GRADE="FAIL(post-sign state not Connected+pubkey)"
+  log "$tag: $VR3_ATTEMPT_GRADE"
+  return 1
+}
+
+cell_vr3() {
+  log "=== VR-3 sign message (x2 repetitions) ==="
+  local g1="NOT-RUN" v1="not-observed" g2="NOT-RUN(second repetition not attempted)" v2="not-observed"
+  if vr3_attempt "vr3"; then g1="$VR3_ATTEMPT_GRADE"; v1="$VR3_ATTEMPT_VERIFIED"
+  else g1="$VR3_ATTEMPT_GRADE"; v1="$VR3_ATTEMPT_VERIFIED"; fi
+  if [ "${g1#PASS}" != "$g1" ]; then
+    if vr3_attempt "vr3b"; then g2="$VR3_ATTEMPT_GRADE"; v2="$VR3_ATTEMPT_VERIFIED"
+    else g2="$VR3_ATTEMPT_GRADE"; v2="$VR3_ATTEMPT_VERIFIED"; fi
+  fi
+  {
+    echo "vr3_rep1=$g1"
+    echo "vr3_rep1_signature_verification=$v1"
+    echo "vr3_rep2=$g2"
+    echo "vr3_rep2_signature_verification=$v2"
+  } > "$OUT/vr3-summary.txt"
+  if [ "${g1#PASS}" != "$g1" ] && [ "${g2#PASS}" != "$g2" ]; then
+    vr3="PASS(x2 repetitions: post-sign state Connected+pubkey after each approval; rep1 verification: $v1; rep2 verification: $v2 — see vr3-summary.txt)"
+  elif [ "${g1#FAIL}" != "$g1" ] || [ "${g2#FAIL}" != "$g2" ]; then
+    vr3="FAIL(rep1: $g1 | rep2: $g2)"
   else
-    vr3="FAIL(post-sign state not Connected+pubkey)"
+    vr3="NOT-RUN(rep1: $g1 | rep2: $g2)"
   fi
   log "vr3: $vr3"
 }
@@ -708,7 +789,14 @@ cell_vr9() {
   tap_text "$TMPD/vr9-conn.xml" "SIGN TEST MESSAGE" || { vr9="FAIL(no sign control)"; return; }
   local f="$OUT/hier-vr9-sheet.xml"
   if ! wait_sheet "$f" 45; then vr9="FAIL(no mock sign sheet)"; capture_window "vr9"; return; fi
-  tap_exact "$f" "Cancel" || { vr9="FAIL(no Cancel on sign sheet)"; capture_window "vr9"; return; }
+  if tap_exact "$f" "Cancel"; then
+    log "vr9: declined via the sign sheet's Cancel control"
+  else
+    # r10: if the sign sheet exposes no literal Cancel control, BACK
+    # dismisses the sheet, which is the wallet-side user rejection.
+    log "vr9: no Cancel control on the sign sheet — declining via BACK (sheet dismissal)"
+    adb shell input keyevent 4 >/dev/null 2>&1 || true
+  fi
   log "vr9: declined at the sign sheet"
   sleep 5
   capture_window "vr9"
@@ -951,9 +1039,12 @@ cell_vr13() {
     return
   fi
   goto_wallet || true
-  dump_ui "$TMPD/vr13-rec.xml" || true
-  tap_text "$TMPD/vr13-rec.xml" "TRY AGAIN" || tap_text "$TMPD/vr13-rec.xml" "CONNECT WALLET" || true
-  if approve_connect_sheet "vr13-reconnect" && wait_for "CONNECTED" 30 "$OUT/hier-vr13-reconnected.xml" && grep -q "$EXPECTED_PUBKEY" "$OUT/hier-vr13-reconnected.xml"; then
+  # r10: the reconnect can complete by silent reauthorize (the cached
+  # authToken lives in the APP's clientlib and survives the wallet's
+  # death) — r9's sheet-only probe timed out on exactly that and the
+  # driver string read FAIL on a reconnect the artefacts showed had
+  # completed. tap_connect_and_complete accepts either path.
+  if tap_connect_and_complete "vr13-reconnect"; then
     vr13="PASS(wallet death mid-session → sign request $outcome (clean), reconnect succeeded)"
   else
     vr13="FAIL(reconnect after wallet death did not succeed)"
@@ -997,35 +1088,53 @@ cell_vr12() {
     log "vr12: no labelled card matched; brought the wallet task forward via am start"
   fi
   sleep 3
-  local result="unknown"
+  local result="unknown" res_state="" res_latency=""
   if dump_ui "$OUT/hier-vr12-returned.xml" && sheet_present "$OUT/hier-vr12-returned.xml"; then
-    log "vr12: approval sheet resumed after foregrounding"
+    log "vr12: approval sheet resumed after foregrounding (wallet did NOT abandon)"
     tap_exact "$OUT/hier-vr12-returned.xml" "Connect" || tap_text "$OUT/hier-vr12-returned.xml" "Connect" || true
     sleep 4
     satisfy_auth_prompt || true
-    if [ "$(vr_state "$TMPD/vr12-st.xml")" = "connected" ]; then result="completed"; fi
+    if [ "$(vr_state "$TMPD/vr12-st.xml")" = "connected" ]; then result="completed"; res_state="connected"; fi
   else
-    # No sheet in the returned dump — read the state on the DAPP's own
-    # surface (bring it forward first; the foreground may still be
-    # the wallet's main screen, whose state is not the app's).
+    # The wallet abandoned the request (mock back at its main screen).
+    # Bring the DAPP forward — that is the return moment the v1.0.7
+    # cure keys on: MainActivity.onResume -> onReturnedToForeground()
+    # cancels a still-pending request after a 5 s grace window and
+    # resolves connect to the interrupted Error state (TRY AGAIN).
+    # r10: poll the state for up to 30 s from the return moment and
+    # record the resolution + its latency (r9 read twice, 20 s apart,
+    # and graded a binary hung/not-hung).
     adb shell am start -W -n "$ACT" >/dev/null 2>&1 || true
-    sleep 2
-    local st; st="$(vr_state "$TMPD/vr12-st2.xml")"
-    log "vr12: post-foreground state=$st (fg=$(fg_pkg))"
+    local elapsed=0 st="working"
+    while [ "$elapsed" -lt 30 ]; do
+      sleep 3; elapsed=$((elapsed + 3))
+      st="$(vr_state "$TMPD/vr12-poll.xml")"
+      if [ "$st" != "working" ] && [ "$st" != "nodump" ]; then break; fi
+    done
+    cp "$TMPD/vr12-poll.xml" "$OUT/hier-vr12-resolved.xml" 2>/dev/null || true
+    res_state="$st"; res_latency="$elapsed"
+    log "vr12: post-return resolution state=$st after ${elapsed}s (fg=$(fg_pkg))"
+    {
+      echo "vr12_resolution_state=$st"
+      echo "vr12_resolution_latency_s=$elapsed"
+      echo "vr12_expectation=v1.0.7 KFC-008: onResume reconciliation cancels the abandoned request after a 5 s grace window -> interrupted Error (TRY AGAIN)"
+    } > "$OUT/vr12-notes.txt"
     if [ "$st" = "connected" ]; then result="completed"
     elif [ "$st" = "error" ] || [ "$st" = "disconnected" ]; then result="failed-closed"
-    elif [ "$st" = "working" ]; then
-      sleep 20
-      st="$(vr_state "$TMPD/vr12-st3.xml")"
-      if [ "$st" = "connected" ]; then result="completed"
-      elif [ "$st" = "error" ] || [ "$st" = "disconnected" ]; then result="failed-closed"
-      else result="hung"; fi
-    fi
+    elif [ "$st" = "working" ]; then result="hung"; fi
   fi
   capture_window "vr12"
   case "$result" in
     completed)     vr12="PASS(flow backgrounded mid-approval, foregrounded, completed to Connected)" ;;
-    failed-closed) vr12="PASS(flow backgrounded mid-approval failed closed on return — clean Error/disconnected, no hang, no crash)" ;;
+    failed-closed)
+      # Resolution alone is not the whole cell: the retry affordance
+      # must actually recover the flow (TRY AGAIN -> connect succeeds).
+      if tap_connect_and_complete "vr12-retry"; then
+        vr12="PASS(abandoned mid-approval resolved out of Working to '$res_state' in ${res_latency}s on return (no hang, no crash); recovery connect succeeded)"
+      else
+        vr12="FAIL(resolved out of Working to '$res_state' in ${res_latency}s but the recovery connect failed)"
+      fi
+      ;;
     *)             vr12="FAIL(background/foreground left the connect flow in state '$result')" ;;
   esac
   log "vr12: $vr12"
