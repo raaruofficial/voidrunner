@@ -59,6 +59,11 @@ on:
           - battery-sweep-api35
           - everything
         default: wallet-core-api36
+      vr12_observe_s:
+        description: VR-12 observation window seconds (30 = cell; 150 = diagnostic)
+        type: string
+        default: "30"
+        required: false
 
 permissions:
   contents: read
@@ -112,6 +117,7 @@ jobs:
         with:
           api-level: "36"
           suite: lifecycle
+          vr12-observe-s: ${{ inputs.vr12_observe_s }}
           avd-name: vr36-lifecycle
           mock-private-key: ${{ secrets.MOCK_WALLET_PRIVATE_KEY }}
           gh-token: ${{ secrets.GITHUB_TOKEN }}

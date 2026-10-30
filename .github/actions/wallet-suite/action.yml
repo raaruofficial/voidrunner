@@ -19,6 +19,11 @@ inputs:
   gh-token:
     required: true
 
+  vr12-observe-s:
+    required: false
+    default: "30"
+    description: VR-12 post-return observation window in seconds (30 = the SS2.2 cell; a diagnostic dispatch may extend it)
+
 runs:
   using: composite
   steps:
@@ -106,6 +111,7 @@ runs:
       env:
         FUN001_OUT: fun001-v107-wallet-evidence
         SUITE: ${{ inputs.suite }}
+        VR12_OBSERVE_S: ${{ inputs.vr12-observe-s }}
         VR_APK: ${{ github.workspace }}/voidrunner-sealed.apk
         MOCK_APK: ${{ github.workspace }}/mock-src/app/build/outputs/apk/debug/app-debug.apk
         EXPECTED_PUBKEY: WGSEgS1wRKJspT4hN8Rw947nX936YdhHRbuqftue9mu
