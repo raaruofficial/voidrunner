@@ -697,8 +697,9 @@ PY
 # --- VR-9: declined signing (sign-message half; sign-and-send half unreachable) -----
 cell_vr9() {
   log "=== VR-9 declined signing (ERROR_NOT_SIGNED) ==="
-  if [ "$(vr_state "$TMPD/vr9-pre.xml")" != "connected" ]; then
-    vr9="NOT-RUN(not connected at cell start)"
+  # r9: explicit precondition, as in cell_vr6 (VR-3's fallout starved it).
+  if ! ensure_connected "vr9-setup"; then
+    vr9="NOT-RUN(could not establish a session)"
     return
   fi
   auth_fresh_enough
@@ -736,8 +737,11 @@ cell_vr9() {
 # --- VR-6: disconnect → fails closed → fresh approval on reconnect -------------------
 cell_vr6() {
   log "=== VR-6 disconnect / fails closed ==="
-  if [ "$(vr_state "$TMPD/vr6-pre.xml")" != "connected" ]; then
-    vr6="NOT-RUN(not connected at cell start)"
+  # r9: establish the precondition explicitly (mirrors cell_vr13) — in
+  # the r8 order VR-3 ran first and the sealed build's post-transact
+  # state defect left the app Disconnected, starving this cell.
+  if ! ensure_connected "vr6-setup"; then
+    vr6="NOT-RUN(could not establish a session)"
     return
   fi
   adb logcat -c >/dev/null 2>&1 || true
@@ -892,9 +896,19 @@ cell_vr13() {
     if identity_wall; then vr13="NOT-RUN(no session can be established on the sealed build — connect fails client-side (iconRelativeUri identity rejection, see VR-1))"; else vr13="NOT-RUN(could not establish a session)"; fi
     return
   fi
-  log "vr13: session live; killing wallet process (am kill — background death, not force-stop)"
-  adb shell am kill "$MOCK" >/dev/null 2>&1 || true
+  # r9: `am kill` did NOT verifiably kill the session-bound mock in the
+  # v1.0.6 r8 run (no process-death line in the cell's logcat window; a
+  # sign sheet appeared 5s later) — the death premise was never
+  # established. Force-stop (the VR-8 instrument) + pidof verification.
+  local pid_before; pid_before="$(adb shell pidof "$MOCK" 2>/dev/null | tr -d '\r')"
+  log "vr13: session live; force-stopping wallet process (pid $pid_before)"
+  adb shell am force-stop "$MOCK" >/dev/null 2>&1 || true
   sleep 2
+  if pid_alive "$MOCK"; then
+    vr13="NOT-RUN(wallet process survived force-stop — death premise not established)"
+    return
+  fi
+  log "vr13: wallet death VERIFIED (pidof empty after force-stop)"
   adb logcat -c >/dev/null 2>&1 || true
   dump_ui "$TMPD/vr13-conn.xml" || true
   tap_text "$TMPD/vr13-conn.xml" "SIGN TEST MESSAGE" || { vr13="FAIL(no sign control)"; return; }
@@ -905,6 +919,15 @@ cell_vr13() {
     if dump_ui "$OUT/hier-vr13-poll.xml" && sheet_present "$OUT/hier-vr13-poll.xml"; then
       outcome="sheet"
       break
+    fi
+    # r9: a force-stopped wallet relaunched by the association intent can
+    # sit at its Authenticate gate (mock main screen) with the request
+    # queued — work the gate so the sheet can follow.
+    if [ "$(fg_pkg)" = "$MOCK" ] && grep -q "AUTHENTICATE" "$OUT/hier-vr13-poll.xml"; then
+      log "vr13: relaunched wallet sits at its Authenticate gate — authenticating"
+      tap_exact "$OUT/hier-vr13-poll.xml" "AUTHENTICATE" || true
+      satisfy_auth_prompt || true
+      date +%s > "$AUTH_EPOCH_FILE" || true
     fi
     local st; st="$(vr_state "$TMPD/vr13-st.xml")"
     if [ "$st" = "error" ]; then outcome="error"; break; fi
