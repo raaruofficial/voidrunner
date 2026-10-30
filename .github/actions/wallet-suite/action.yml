@@ -1,9 +1,9 @@
-name: VOIDRUNNER v1.0.7 wallet-suite job
+name: VOIDRUNNER v1.0.8 wallet-suite job
 description: >-
   One cell of the SOLANA RESOURCES BINDING §2.2 wallet verdict: builds the
   pinned Mock MWA Wallet from source, boots a PIN-locked AVD on the
   CI-KVM lane, and runs tools/verify-v104-wallet.sh against the sealed,
-  hash-verified v1.0.6 artefact.
+  hash-verified v1.0.8 artefact.
 
 inputs:
   api-level:
@@ -53,14 +53,14 @@ runs:
         distribution: temurin
         java-version: "17"
 
-    - name: Download sealed v1.0.7 artefact 12954756002 + hash gate
+    - name: Download sealed v1.0.8 artefact 12962763421 + hash gate
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.gh-token }}
-        EXPECTED_SHA256: 4253c7ce63eded08666383aa347424001a8f60064be640f241609ff071c23580
+        EXPECTED_SHA256: 6a073094023def527b587f4889865d98a1f960fdc11319ecf06a86055e1c2ef3
       run: |
         set -euo pipefail
-        gh api "repos/raaruofficial/voidrunner/actions/artifacts/12954756002/zip" > /tmp/vr-artefact.zip
+        gh api "repos/raaruofficial/voidrunner/actions/artifacts/12962763421/zip" > /tmp/vr-artefact.zip
         mkdir -p /tmp/vr-artefact
         unzip -o /tmp/vr-artefact.zip -d /tmp/vr-artefact
         cp /tmp/vr-artefact/app-release.apk "$GITHUB_WORKSPACE/voidrunner-sealed.apk"
@@ -109,7 +109,7 @@ runs:
     - name: Run wallet suite on PIN-locked AVD (API ${{ inputs.api-level }})
       uses: reactivecircus/android-emulator-runner@v2
       env:
-        FUN001_OUT: fun001-v107-wallet-evidence
+        FUN001_OUT: fun001-v108-wallet-evidence
         SUITE: ${{ inputs.suite }}
         VR12_OBSERVE_S: ${{ inputs.vr12-observe-s }}
         VR_APK: ${{ github.workspace }}/voidrunner-sealed.apk
@@ -133,6 +133,6 @@ runs:
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: fun001-v107-wallet-${{ inputs.suite }}-api${{ inputs.api-level }}
-        path: fun001-v107-wallet-evidence
+        name: fun001-v108-wallet-${{ inputs.suite }}-api${{ inputs.api-level }}
+        path: fun001-v108-wallet-evidence
         if-no-files-found: warn

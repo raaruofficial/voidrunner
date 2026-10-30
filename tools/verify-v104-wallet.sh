@@ -45,6 +45,15 @@
 # post-resolution recovery connect is recorded in the notes either
 # way. tap_connect_and_complete also works the mock's Authenticate
 # gate if a relaunched wallet sits at it.
+# Driver r11 (v1.0.8 verdict, REPORT_V108): the reconciler now resolves
+# UI state DIRECTLY from session truth (HAUNT v0.1.16 shape), so VR-12's
+# PASS bar tightens to the design: resolution within grace+15 s of the
+# return moment (latency <= 20 s; the 5 s grace is inside the app). The
+# cell is graded as THREE first-class lines — vr12a (resolution
+# promptness, connect branch), vr12b (in-process TRY AGAIN retry leg),
+# vr12sign (sign branch: abandoned sign must resolve directly to
+# Connected+pubkey, then a further sign must succeed) — recorded in
+# vr12-notes.txt / vr12s-notes.txt and echoed into the verdict file.
 #
 # Any AndroidRuntime FATAL (either package) or any IllegalStateException
 # in a captured logcat window is counted and fails the whole verdict.
@@ -71,6 +80,7 @@ log() { echo "$*" | tee -a "$LANE_LOG"; }
 # --- verdict state -------------------------------------------------------------
 vr1="NOT-RUN"; vr2="NOT-RUN"; vr3="NOT-RUN"; vr6="NOT-RUN"; vr7="NOT-RUN"
 vr8="NOT-RUN"; vr9="NOT-RUN"; vr11="NOT-RUN"; vr12="NOT-RUN"; vr13="NOT-RUN"
+vr12a="NOT-RUN"; vr12b="NOT-RUN"; vr12sign="NOT-RUN"
 fatal_vr_total="0"; fatal_mock_total="0"; ise_total="0"; stopped_dialogs="0"
 lock_pin="unknown"; lock_fp="unknown"; auth_note="not attempted"
 
@@ -1137,8 +1147,9 @@ cell_vr12() {
       echo "vr12_resolution_latency_s=$elapsed"
       echo "vr12_observe_window_s=$observe_s"
       printf '%s' "$samples"
-      if [ "$st" != "working" ] && [ "$elapsed" -le 30 ]; then echo "vr12_in_window_resolution=yes"; else echo "vr12_in_window_resolution=no"; fi
-      echo "vr12_expectation=v1.0.7 KFC-008: onResume reconciliation cancels the abandoned request after a 5 s grace window -> interrupted Error (TRY AGAIN)"
+      if [ "$st" != "working" ] && [ "$elapsed" -le 20 ]; then echo "vr12_in_window_resolution=yes"; else echo "vr12_in_window_resolution=no"; fi
+      echo "vr12_bar_s=20 (grace 5 s + 15 s; REPORT_V108 cell definition)"
+      echo "vr12_expectation=v1.0.8 KFC-008: after the 5 s grace the reconciler claims the pending generation and writes UI state DIRECTLY from session truth -> interrupted Error (TRY AGAIN); no dependence on waking the parked clientlib awaiter"
     } > "$OUT/vr12-notes.txt"
     if [ "$st" = "connected" ]; then result="completed"
     elif [ "$st" = "error" ] || [ "$st" = "disconnected" ]; then result="failed-closed"
@@ -1146,34 +1157,129 @@ cell_vr12() {
   fi
   capture_window "vr12"
   case "$result" in
-    completed)     vr12="PASS(flow backgrounded mid-approval, foregrounded, completed to Connected)" ;;
+    completed)
+      vr12a="PASS(approval completed through the result path after foregrounding — the wallet had not abandoned, so no direct resolution was needed)"
+      vr12b="NOT-RUN(no interrupted Error to retry from — the flow completed)"
+      vr12="PASS(flow backgrounded mid-approval, foregrounded, completed to Connected)" ;;
     failed-closed)
-      # Resolution alone is not the whole cell: the retry affordance
-      # must actually recover the flow (TRY AGAIN -> connect succeeds).
-      # r10.3: the recovery result is recorded in vr12-notes.txt either
-      # way, and a resolution that lands OUTSIDE the 30 s cell window
-      # (e.g. the 120 s backstop on a diagnostic 150 s dispatch) is
-      # graded FAIL with its latency named - it is not the designed
-      # in-window resolution.
+      # r11: (a) resolution promptness and (b) the in-process retry leg
+      # are graded as separate first-class lines. (a) passes only on the
+      # designed outcome: the interrupted Error within grace+15 s
+      # (latency <= 20 s from the return moment). (b) passes only if
+      # TRY AGAIN from that Error completes the connect IN-PROCESS.
+      if [ "$res_state" = "error" ] && [ "$res_latency" -le 20 ]; then
+        vr12a="PASS(resolved out of Working to the interrupted Error in ${res_latency}s — within the grace+15 s bar)"
+      elif [ "$res_latency" -le 20 ]; then
+        vr12a="FAIL(resolved out of Working to '$res_state' in ${res_latency}s — not the designed interrupted Error)"
+      else
+        vr12a="FAIL(resolved out of Working only at ${res_latency}s — outside the grace+15 s bar (20 s) — to '$res_state'; v1.0.7-class late resolution)"
+      fi
       if tap_connect_and_complete "vr12-retry"; then
         echo "vr12_post_resolution_connect=PASS (recovery connect after resolution to '$res_state' at ${res_latency}s)" >> "$OUT/vr12-notes.txt"
-        if [ "$res_latency" -le 30 ]; then
-          vr12="PASS(abandoned mid-approval resolved out of Working to '$res_state' in ${res_latency}s on return (no hang, no crash); recovery connect succeeded)"
-        else
-          vr12="FAIL(resolved out of Working only at ${res_latency}s - outside the 30 s window - to '$res_state' (backstop-class resolution; the 5 s grace cancellation did not resolve in-window); post-resolution recovery connect succeeded)"
-        fi
+        vr12b="PASS(TRY AGAIN from the interrupted Error completed the connect in-process to Connected+pubkey)"
       else
         echo "vr12_post_resolution_connect=FAIL (no recovery connect after resolution to '$res_state' at ${res_latency}s)" >> "$OUT/vr12-notes.txt"
-        if [ "$res_latency" -le 30 ]; then
-          vr12="FAIL(resolved out of Working to '$res_state' in ${res_latency}s but the recovery connect failed)"
-        else
-          vr12="FAIL(resolved out of Working only at ${res_latency}s - outside the 30 s window - to '$res_state'; post-resolution recovery connect also failed)"
-        fi
+        vr12b="FAIL(TRY AGAIN from the interrupted Error did not complete a connect in-process)"
+      fi
+      if [ "${vr12a#PASS}" != "$vr12a" ] && [ "${vr12b#PASS}" != "$vr12b" ]; then
+        vr12="PASS(abandoned mid-approval resolved to the interrupted Error in ${res_latency}s; in-process TRY AGAIN recovery connect succeeded)"
+      else
+        vr12="FAIL(vr12a: $vr12a | vr12b: $vr12b)"
       fi
       ;;
-    *)             vr12="FAIL(background/foreground left the connect flow in state '$result')" ;;
+    *)
+      vr12a="FAIL(no resolution — post-return flow ended in state '$result')"
+      vr12b="NOT-RUN(no resolution to retry from)"
+      vr12="FAIL(background/foreground left the connect flow in state '$result')" ;;
   esac
+  if [ -f "$OUT/vr12-notes.txt" ]; then
+    { echo "vr12a=$vr12a"; echo "vr12b=$vr12b"; } >> "$OUT/vr12-notes.txt"
+  fi
   log "vr12: $vr12"
+  log "vr12a: $vr12a"
+  log "vr12b: $vr12b"
+}
+
+# --- VR-12S: sign-branch abandonment (KFC-008, sign path) --------------------------------
+cell_vr12sign() {
+  log "=== VR-12S sign-branch abandonment mid-approval ==="
+  if ! ensure_connected "vr12s-setup"; then
+    vr12sign="NOT-RUN(could not establish a session)"; log "vr12sign: $vr12sign"; return
+  fi
+  auth_fresh_enough
+  adb logcat -c >/dev/null 2>&1 || true
+  dump_ui "$TMPD/vr12s-conn.xml" || true
+  tap_text "$TMPD/vr12s-conn.xml" "SIGN TEST MESSAGE" || { vr12sign="FAIL(no sign control)"; log "vr12sign: $vr12sign"; return; }
+  local f="$OUT/hier-vr12s-sheet.xml"
+  if ! wait_sheet "$f" 45; then vr12sign="FAIL(no mock sign sheet)"; capture_window "vr12s"; log "vr12sign: $vr12sign"; return; fi
+  log "vr12s: sign sheet up; sending HOME (backgrounding both tasks)"
+  adb shell input keyevent 3 >/dev/null 2>&1 || true
+  sleep 3
+  snap "shot-vr12s-backgrounded.png"
+  adb shell input keyevent 187 >/dev/null 2>&1 || true  # APP_SWITCH / recents
+  sleep 3
+  dump_ui "$OUT/hier-vr12s-recents.xml" || true
+  if tap_desc "$OUT/hier-vr12s-recents.xml" "Mock MWA Wallet" || tap_text "$OUT/hier-vr12s-recents.xml" "Mock" || tap_desc "$OUT/hier-vr12s-recents.xml" "VOIDRUNNER" || tap_text "$OUT/hier-vr12s-recents.xml" "VOIDRUNNER"; then
+    log "vr12s: tapped a recents card (wallet first)"
+  else
+    adb shell am start -W -n "$MOCK_ACT" >/dev/null 2>&1 || true
+    log "vr12s: no labelled card matched; brought the wallet task forward via am start"
+  fi
+  sleep 3
+  if dump_ui "$OUT/hier-vr12s-returned.xml" && sheet_present "$OUT/hier-vr12s-returned.xml"; then
+    # Premise not established: the wallet kept the sign request alive.
+    vr12sign="NOT-RUN(wallet did not abandon the sign request — its sheet resumed on foregrounding)"
+    adb shell input keyevent 4 >/dev/null 2>&1 || true  # dismiss the sheet so later cells start clean
+    sleep 2
+    capture_window "vr12s"
+    log "vr12sign: $vr12sign"
+    return
+  fi
+  # Wallet abandoned the sign request. Bring the DAPP forward — the
+  # return moment the reconciler keys on. Designed v1.0.8 outcome: the
+  # state resolves DIRECTLY to Connected (restored from the stored
+  # session field) within grace+15 s — no error, no disconnect.
+  adb shell am start -W -n "$ACT" >/dev/null 2>&1 || true
+  local elapsed=0 st="working" samples=""
+  while [ "$elapsed" -lt 30 ]; do
+    sleep 3; elapsed=$((elapsed + 3))
+    st="$(vr_state "$TMPD/vr12s-poll.xml")"
+    samples="${samples}vr12s_sample_${elapsed}s=$st\n"
+    if [ "$st" != "working" ] && [ "$st" != "nodump" ]; then break; fi
+  done
+  cp "$TMPD/vr12s-poll.xml" "$OUT/hier-vr12s-resolved.xml" 2>/dev/null || true
+  {
+    echo "vr12s_resolution_state=$st"
+    echo "vr12s_resolution_latency_s=$elapsed"
+    printf '%s' "$samples"
+    echo "vr12s_bar_s=20 (grace 5 s + 15 s; REPORT_V108 cell definition)"
+    echo "vr12s_expectation=v1.0.8 KFC-008 sign branch: reconciler restores Connected from sessionPublicKeyBase58 directly; no error, no disconnect"
+  } > "$OUT/vr12s-notes.txt"
+  log "vr12s: post-return resolution state=$st after ${elapsed}s (fg=$(fg_pkg))"
+  capture_window "vr12s"
+  if [ "$st" = "connected" ] && [ "$elapsed" -le 20 ]; then
+    # A further sign must now succeed normally.
+    auth_fresh_enough
+    dump_ui "$TMPD/vr12s-conn2.xml" || true
+    if tap_text "$TMPD/vr12s-conn2.xml" "SIGN TEST MESSAGE" && wait_sheet "$OUT/hier-vr12s-sign2-sheet.xml" 45; then
+      tap_exact "$OUT/hier-vr12s-sign2-sheet.xml" "Approve" || true
+      sleep 3
+      satisfy_auth_prompt || true
+      if [ "$(vr_state "$TMPD/vr12s-after2.xml")" = "connected" ]; then
+        vr12sign="PASS(abandoned sign resolved directly to Connected+pubkey in ${elapsed}s — within the grace+15 s bar, no error/disconnect; a further sign then succeeded)"
+      else
+        vr12sign="FAIL(resolved to Connected in ${elapsed}s but the follow-up sign did not return to Connected)"
+      fi
+    else
+      vr12sign="FAIL(resolved to Connected in ${elapsed}s but the follow-up sign produced no sheet)"
+    fi
+  elif [ "$st" = "connected" ]; then
+    vr12sign="FAIL(resolved to Connected only at ${elapsed}s — outside the grace+15 s bar (20 s))"
+  else
+    vr12sign="FAIL(post-return state '$st' after ${elapsed}s — expected direct resolution to Connected+pubkey)"
+  fi
+  echo "vr12sign=$vr12sign" >> "$OUT/vr12s-notes.txt"
+  log "vr12sign: $vr12sign"
 }
 
 # --- VR-11: entry points / destination registry ------------------------------------------
@@ -1254,7 +1360,7 @@ cell_vr11() {
 case "$SUITE" in
   core)      cell_vr1; cell_vr3; cell_vr9; cell_vr6; cell_vr2 ;;
   errors)    cell_vr7; cell_vr8; cell_vr13 ;;
-  lifecycle) cell_vr12; cell_vr11 ;;
+  lifecycle) cell_vr12; cell_vr12sign; cell_vr11 ;;
   *) log "unknown SUITE=$SUITE"; exit 2 ;;
 esac
 
@@ -1277,6 +1383,9 @@ log "totals: vr_fatal=$fatal_vr_total mock_fatal=$fatal_mock_total illegal_state
   echo "vr9=$vr9"
   echo "vr11=$vr11"
   echo "vr12=$vr12"
+  echo "vr12a=$vr12a"
+  echo "vr12b=$vr12b"
+  echo "vr12sign=$vr12sign"
   echo "vr13=$vr13"
   echo "vr4=NOT-RUN(no sign-only surface exists in the sealed build — WalletManager implements connect/signMessage/signAndSendTransactions only; signTransactions deliberately not implemented per MWA 2.0 deprecation)"
   echo "vr5=NOT-RUN(sign-and-send unreachable: exposed only via the in-WebView bridge behind the gated paid checkout in the sealed build; mock key unfunded by design)"
@@ -1292,7 +1401,7 @@ log "totals: vr_fatal=$fatal_vr_total mock_fatal=$fatal_mock_total illegal_state
 cat "$OUT/verdict-wallet.txt" | tee -a "$LANE_LOG"
 
 fail="0"
-for v in "$vr1" "$vr2" "$vr3" "$vr6" "$vr7" "$vr8" "$vr9" "$vr11" "$vr12" "$vr13"; do
+for v in "$vr1" "$vr2" "$vr3" "$vr6" "$vr7" "$vr8" "$vr9" "$vr11" "$vr12" "$vr12sign" "$vr13"; do
   case "$v" in FAIL*) fail="1" ;; esac
 done
 if [ "$fatal_vr_total" -gt 0 ] || [ "$fatal_mock_total" -gt 0 ] || [ "$ise_total" -gt 0 ]; then fail="1"; fi
