@@ -25,7 +25,12 @@ object Base58 {
             var carry = input[inputStart].toInt() and 0xFF
             var i = encoded.size - 1
             while (i >= outputStart || carry != 0) {
-                carry += 256 * (if (i >= outputStart) 0 else encoded[i].toInt() and 0xFF)
+                // KFC-006 fix (v0.1.14): positions INSIDE the written digit
+                // range (i >= outputStart) hold real digits and must
+                // contribute them; positions beyond it are implicit zeros.
+                // The shipped form had the branches inverted, collapsing
+                // every multi-byte value to a single character.
+                carry += 256 * (if (i >= outputStart) encoded[i].toInt() and 0xFF else 0)
                 encoded[i] = (carry % 58).toByte()
                 carry /= 58
                 i--
@@ -54,7 +59,8 @@ object Base58 {
             var carry = digit
             var i = decoded.size - 1
             while (i >= outputStart || carry != 0) {
-                carry += 58 * (if (i >= outputStart) 0 else decoded[i].toInt() and 0xFF)
+                // KFC-006 fix (v0.1.14): same inverted condition as encode.
+                carry += 58 * (if (i >= outputStart) decoded[i].toInt() and 0xFF else 0)
                 decoded[i] = (carry % 256).toByte()
                 carry = carry shr 8
                 i--

@@ -12,8 +12,8 @@ android {
         applicationId = "com.voidrunner.app"
         minSdk = 28
         targetSdk = 35
-        versionCode = 5
-        versionName = "1.0.5"
+        versionCode = 6
+        versionName = "1.0.6"
 
         vectorDrawables { useSupportLibrary = true }
     }
@@ -99,4 +99,7 @@ dependencies {
     implementation("com.solanamobile:mobile-wallet-adapter-clientlib-ktx:2.0.8")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
+
+    // JVM unit tests (Base58 known-vector seal test, KFC-006).
+    testImplementation("junit:junit:4.13.2")
 }
