@@ -239,45 +239,97 @@ jobs:
           echo "Hash verified byte-for-byte; proceeding to cold run."
 
       - name: Pre-create low-RAM AVD with hw.ramSize=1024 in config.ini
+        env:
+          ANDROID_AVD_HOME: /home/runner/.android/avd
         run: |
-          # r10.1: the first v1.0.7 attempt died silently inside this
-          # step (sdkmanager output was piped to /dev/null, and the
-          # evidence dir did not exist yet for the closing tee). This
-          # version creates the evidence dir first, narrates every
-          # sub-step into the job log AND an evidence file, tolerates
-          # sdkmanager noise, and fails only on the final verification
-          # (config.ini exists + ramSize set).
-          mkdir -p fun001-v107-battery-lowram
+          # r10.2: attempt 1 died silently under set -e with sdkmanager
+          # output /dev/null'd; attempt 2 (r10.1) showed sdkmanager +
+          # avdmanager run, yet no config.ini landed at $HOME/.android/avd
+          # — the AVD home was never pinned. This version pins
+          # ANDROID_AVD_HOME for this step and the runner step, searches
+          # for the created AVD wherever it landed, and falls back to
+          # hand-writing the AVD files (avdmanager is a file writer; a
+          # correct .ini + config.ini pair IS an AVD) if its output
+          # cannot be found. RAM rationale: the ram-size input and the
+          # -memory flag never took downward on this lane (v1.0.4-v1.0.6
+          # low-RAM AVDs booted at ~4 GB despite both), so the RAM is set
+          # in config.ini and the job device-info.txt (/proc/meminfo) is
+          # the grading measurement — the cell runs only on ~1 GB.
+          mkdir -p fun001-v107-battery-lowram "$ANDROID_AVD_HOME"
           exec > >(tee -a fun001-v107-battery-lowram/avd-create.log) 2>&1
           set -uo pipefail
-          # v1.0.7 verdict tasking: the ram-size input / -memory flag
-          # never took downward on this lane (the v1.0.4-v1.0.6 low-RAM
-          # AVDs all booted at ~4 GB despite both). Control the RAM
-          # through the AVD's own config.ini instead: create the AVD
-          # here, set hw.ramSize=1024, and let the runner step below
-          # REUSE it (force-avd-creation: false). The job's
-          # device-info.txt (/proc/meminfo) records what actually
-          # booted — the cell is graded on that measurement, never on
-          # this request.
           SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
           AVDM="$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager"
-          echo "sdk_root=$ANDROID_HOME"
-          ls "$ANDROID_HOME/cmdline-tools" || true
-          ls "$ANDROID_HOME/system-images/android-35/google_apis" || echo "API35 google_apis image not preinstalled"
-          java -version 2>&1 | head -2 || echo "no java on PATH"
+          echo "sdk_root=$ANDROID_HOME avd_home=$ANDROID_AVD_HOME home=$HOME"
           yes | "$SDKM" --licenses > /dev/null 2>&1 || true
           if [ ! -d "$ANDROID_HOME/system-images/android-35/google_apis/x86_64" ]; then
             echo "installing system-images;android-35;google_apis;x86_64 ..."
-            "$SDKM" "system-images;android-35;google_apis;x86_64" || echo "sdkmanager install rc=$? (continuing; avdmanager will judge)"
+            "$SDKM" "system-images;android-35;google_apis;x86_64" || echo "sdkmanager install rc=$? (continuing)"
           else
-            echo "system image already present on the runner image"
+            echo "system image already present"
           fi
-          echo no | "$AVDM" create avd -n v107-lowram -k "system-images;android-35;google_apis;x86_64" -d pixel_7_pro --force || echo no | "$AVDM" create avd -n v107-lowram -k "system-images;android-35;google_apis;x86_64" --force
-          CFG="$HOME/.android/avd/v107-lowram.avd/config.ini"
+          echo no | "$AVDM" create avd -n v107-lowram -k "system-images;android-35;google_apis;x86_64" -d pixel_7_pro --force || echo "avdmanager rc=$?"
+          "$AVDM" list avd || true
+          ls -la "$ANDROID_AVD_HOME" || true
+          CFG="$ANDROID_AVD_HOME/v107-lowram.avd/config.ini"
           if [ ! -f "$CFG" ]; then
-            echo "FATAL: AVD config.ini was not created"
+            FOUND="$(find "$HOME" "$ANDROID_HOME" -name 'v107-lowram.avd' -type d 2>/dev/null | head -1)"
+            if [ -n "$FOUND" ]; then CFG="$FOUND/config.ini"; fi
+          fi
+          if [ ! -f "$CFG" ]; then
+            echo "avdmanager output not found - hand-writing the AVD"
+            mkdir -p "$ANDROID_AVD_HOME/v107-lowram.avd"
+            echo "avd.ini.encoding=UTF-8" > "$ANDROID_AVD_HOME/v107-lowram.ini"
+            echo "path=$ANDROID_AVD_HOME/v107-lowram.avd" >> "$ANDROID_AVD_HOME/v107-lowram.ini"
+            echo "path.rel=avd/v107-lowram.avd" >> "$ANDROID_AVD_HOME/v107-lowram.ini"
+            echo "target=android-35" >> "$ANDROID_AVD_HOME/v107-lowram.ini"
+            : > "$CFG"
+          echo "AvdId=v107-lowram" >> "$CFG"
+          echo "abi.type=x86_64" >> "$CFG"
+          echo "avd.ini.displayname=v107-lowram" >> "$CFG"
+          echo "disk.dataPartition.size=6442450944" >> "$CFG"
+          echo "hw.accelerometer=yes" >> "$CFG"
+          echo "hw.audioInput=yes" >> "$CFG"
+          echo "hw.battery=yes" >> "$CFG"
+          echo "hw.camera.back=emulated" >> "$CFG"
+          echo "hw.camera.front=emulated" >> "$CFG"
+          echo "hw.cpu.arch=x86_64" >> "$CFG"
+          echo "hw.cpu.ncore=4" >> "$CFG"
+          echo "hw.dPad=no" >> "$CFG"
+          echo "hw.device.manufacturer=Google" >> "$CFG"
+          echo "hw.device.name=pixel_7_pro" >> "$CFG"
+          echo "hw.gps=yes" >> "$CFG"
+          echo "hw.gpu.enabled=no" >> "$CFG"
+          echo "hw.gpu.mode=auto" >> "$CFG"
+          echo "hw.initialOrientation=Portrait" >> "$CFG"
+          echo "hw.keyboard=yes" >> "$CFG"
+          echo "hw.lcd.density=560" >> "$CFG"
+          echo "hw.lcd.height=3120" >> "$CFG"
+          echo "hw.lcd.width=1440" >> "$CFG"
+          echo "hw.mainKeys=no" >> "$CFG"
+          echo "hw.ramSize=1024" >> "$CFG"
+          echo "hw.sdCard=yes" >> "$CFG"
+          echo "hw.sensors.orientation=yes" >> "$CFG"
+          echo "hw.sensors.proximity=yes" >> "$CFG"
+          echo "hw.trackBall=no" >> "$CFG"
+          echo "image.sysdir.1=system-images/android-35/google_apis/x86_64/" >> "$CFG"
+          echo "runtime.network.latency=none" >> "$CFG"
+          echo "runtime.network.speed=full" >> "$CFG"
+          echo "sdcard.size=512 MB" >> "$CFG"
+          echo "showDeviceFrame=yes" >> "$CFG"
+          echo "skin.dynamic=yes" >> "$CFG"
+          echo "skin.name=1440x3120" >> "$CFG"
+          echo "skin.path=_no_skin" >> "$CFG"
+          echo "tag.display=Google APIs" >> "$CFG"
+          echo "tag.id=google_apis" >> "$CFG"
+          echo "target=android-35" >> "$CFG"
+          echo "vm.heapSize=228" >> "$CFG"
+          fi
+          if [ ! -f "$CFG" ]; then
+            echo "FATAL: no AVD config.ini by any route"
             exit 1
           fi
+          echo "using CFG=$CFG"
           if grep -q "^hw.ramSize=" "$CFG"; then
             sed -i 's/^hw.ramSize=.*/hw.ramSize=1024/' "$CFG"
           else
@@ -290,6 +342,8 @@ jobs:
           } | tee fun001-v107-battery-lowram/avd-config.txt
 
       - name: Low-RAM run on API 35 (1024 MB, phases A+B)
+        env:
+          ANDROID_AVD_HOME: /home/runner/.android/avd
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 35
