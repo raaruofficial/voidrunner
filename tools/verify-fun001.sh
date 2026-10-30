@@ -174,17 +174,24 @@ extract_stacks() { # $1 = logcat file, $2 = output file
   awk '/FATAL EXCEPTION/{c=60} c&&c--' "$1" > "$2" 2>/dev/null || true
 }
 
-back_home() { # press Back until the home hierarchy (PLAY+SETTINGS) is produced
+back_home() { # press Back until the NATIVE home hierarchy is produced
+  # r9: the r8 predicate grepped the raw substrings PLAY/SETTINGS, which
+  # the game's own WebView home page also carries ("SIGN IN WITH .SKR TO
+  # PLAY", "SETTINGS +", "HOW TO PLAY") — on v1.0.6 API 36 it declared
+  # "home reached after 0 back presses" while still on the game screen,
+  # and the WALLET/SETTINGS sweep legs then tapped the game page. The
+  # native home is discriminated by its exact button texts, which the
+  # game page never produces: text="▶ and text="WALLET".
   local i
   for i in 1 2 3 4; do
-    if dump_ui "$TMPD/probe-home.xml" && grep -q "PLAY" "$TMPD/probe-home.xml" && grep -q "SETTINGS" "$TMPD/probe-home.xml"; then
+    if dump_ui "$TMPD/probe-home.xml" && grep -qF 'text="▶' "$TMPD/probe-home.xml" && grep -qF 'text="WALLET"' "$TMPD/probe-home.xml"; then
       log "back_home: home reached after $((i-1)) back presses"
       return 0
     fi
     adb shell input keyevent 4 >/dev/null 2>&1 || true
     sleep 2
   done
-  if dump_ui "$TMPD/probe-home.xml" && grep -q "PLAY" "$TMPD/probe-home.xml"; then
+  if dump_ui "$TMPD/probe-home.xml" && grep -qF 'text="▶' "$TMPD/probe-home.xml" && grep -qF 'text="WALLET"' "$TMPD/probe-home.xml"; then
     return 0
   fi
   log "back_home: FAILED to return to a recognisable home screen"
