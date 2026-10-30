@@ -21,6 +21,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * UI-facing wallet state. Observed by Compose screens via [uiState].
@@ -58,6 +59,23 @@ sealed interface WalletUiState {
  *   backgrounded the app mid-approval and the wallet dropped the request)
  *   resolves to session truth instead of hanging in Working forever —
  *   the clientlib transact itself carries no timeout.
+ *
+ * v1.0.8 KFC-008 CORRECTION (REPORT_V107, §2.2 verdict on v1.0.7 —
+ * VR-12 FAIL, replicated ×2 + 150 s diagnostic): the v1.0.7 shape's
+ * foreground reconciliation cancelled the request Deferred and let the
+ * state resolution happen behind `deferred.await()` in the caller's
+ * coroutine. clientlib's connect/transact suspension is
+ * non-cooperative: cancelling the Deferred does not wake the awaiter
+ * while the underlying call is parked, so the app sat in Working
+ * through the full 30 s cell window (first resolution at ~51 s
+ * post-return, on clientlib's own cadence — not the grace cancel, not
+ * the 120 s backstop). The reconciler now resolves the UI state
+ * DIRECTLY from session truth after the grace window, generation-
+ * guarded so neither the wrapper's late resolution nor a zombie
+ * request's late failure write can overwrite it, and cancels the
+ * request as best effort. Ported from HAUNT v0.1.16 (haunt-lane/repo
+ * commit 40582dc), whose v0.1.15 verdict runtime-proved the identical
+ * failure on this same cure shape.
  */
 class WalletManager {
 
@@ -109,6 +127,40 @@ class WalletManager {
     @Volatile
     private var pendingRequest: Job? = null
 
+    /** Which kind of request is in flight — the reconciler's direct
+     *  resolution differs by kind (connect → Error; sign → restore). */
+    private enum class RequestKind { CONNECT, SIGN }
+
+    @Volatile
+    private var pendingKind: RequestKind? = null
+
+    /**
+     * v1.0.8: request generation + resolution claim. Every request
+     * takes the next generation; exactly one party — the wrapper on
+     * its interrupted path, or the foreground reconciler — may claim
+     * a generation's state resolution ([claimResolution]). A claimed
+     * generation's late writes (the wrapper's onInterrupted, a zombie
+     * connect's failure write) are suppressed: the state has already
+     * been resolved by whoever claimed it.
+     */
+    private val generationCounter = AtomicInteger(0)
+
+    @Volatile
+    private var pendingGeneration: Int = 0
+
+    @Volatile
+    private var resolvedGeneration: Int = 0
+
+    private val resolutionLock = Any()
+
+    /** Claim generation [gen]'s state resolution. True exactly once per gen. */
+    private fun claimResolution(gen: Int): Boolean = synchronized(resolutionLock) {
+        if (resolvedGeneration == gen) false else {
+            resolvedGeneration = gen
+            true
+        }
+    }
+
     /** Get/set the MWA auth token so it can be persisted across restarts. */
     var persistedAuthToken: String?
         get() = walletAdapter.authToken
@@ -123,11 +175,11 @@ class WalletManager {
      * Returns the wallet's Base58 public key on success.
      */
     suspend fun connect(sender: ActivityResultSender): Result<String> =
-        runWalletRequest(onInterrupted = { fail(INTERRUPTED_MESSAGE) }) {
-            performConnect(sender)
+        runWalletRequest(RequestKind.CONNECT, onInterrupted = { fail(INTERRUPTED_MESSAGE) }) { gen ->
+            performConnect(sender, gen)
         }
 
-    private suspend fun performConnect(sender: ActivityResultSender): Result<String> =
+    private suspend fun performConnect(sender: ActivityResultSender, gen: Int): Result<String> =
         withContext(Dispatchers.IO) {
             _uiState.value = WalletUiState.Working
             val result = runCatching { walletAdapter.connect(sender) }.getOrElse { e ->
@@ -135,13 +187,13 @@ class WalletManager {
                 // wallet failure: rethrow so this request completes as
                 // cancelled and runWalletRequest resolves the UI state.
                 if (e is CancellationException) throw e
-                return@withContext fail(e.message ?: "Connection failed", e)
+                return@withContext failIfCurrent(gen, e.message ?: "Connection failed", e)
             }
             when (result) {
                 is TransactionResult.Success -> {
                     val pubkeyBytes = result.authResult.accounts.firstOrNull()?.publicKey
                     if (pubkeyBytes == null) {
-                        fail("Wallet returned no accounts")
+                        failIfCurrent(gen, "Wallet returned no accounts")
                     } else {
                         val base58 = Base58.encode(pubkeyBytes)
                         // KFC-007: capture the session pubkey into its own
@@ -154,9 +206,9 @@ class WalletManager {
                     }
                 }
                 is TransactionResult.NoWalletFound ->
-                    fail("No MWA-compatible wallet found on this device")
+                    failIfCurrent(gen, "No MWA-compatible wallet found on this device")
                 is TransactionResult.Failure ->
-                    fail(result.e.message ?: "Wallet connection failed", result.e)
+                    failIfCurrent(gen, result.e.message ?: "Wallet connection failed", result.e)
             }
         }
 
@@ -166,6 +218,7 @@ class WalletManager {
      */
     suspend fun signMessage(sender: ActivityResultSender, message: String): Result<String> =
         runWalletRequest(
+            RequestKind.SIGN,
             onInterrupted = {
                 restoreConnectedState()
                 Result.failure(IllegalStateException(INTERRUPTED_MESSAGE))
@@ -221,6 +274,7 @@ class WalletManager {
         serializedTransactions: List<ByteArray>
     ): Result<List<String>> =
         runWalletRequest(
+            RequestKind.SIGN,
             onInterrupted = {
                 restoreConnectedState()
                 Result.failure(IllegalStateException(INTERRUPTED_MESSAGE))
@@ -300,13 +354,34 @@ class WalletManager {
      */
     fun onReturnedToForeground() {
         val job = pendingRequest ?: return
+        val gen = pendingGeneration
+        val kind = pendingKind ?: return
         if (!job.isActive) return
         requestScope.launch {
             delay(FOREGROUND_RECONCILE_GRACE_MS)
-            // Identity check: cancel only the very request that was
+            // Identity check: act only on the very request that was
             // pending at foreground time, and only if it never resolved.
-            if (pendingRequest === job && job.isActive) {
-                job.cancel()
+            if (pendingRequest !== job || pendingGeneration != gen || !job.isActive) return@launch
+            // v1.0.8: resolve the UI state DIRECTLY from session truth.
+            // Cancelling the request alone does not resolve anything in
+            // a user-acceptable window — the wrapper's resolution sits
+            // behind an await on a non-cooperative clientlib call (see
+            // the class header). Claiming the generation first makes
+            // this the single writer of the post-abandonment state: the
+            // wrapper's late onInterrupted and the zombie request's
+            // late failure writes are generation-suppressed.
+            if (claimResolution(gen)) {
+                when (kind) {
+                    RequestKind.CONNECT ->
+                        _uiState.value = WalletUiState.Error(INTERRUPTED_MESSAGE)
+                    RequestKind.SIGN ->
+                        restoreConnectedState()
+                }
+            }
+            job.cancel()
+            if (pendingGeneration == gen) {
+                pendingRequest = null
+                pendingKind = null
             }
         }
     }
@@ -327,11 +402,15 @@ class WalletManager {
      *   cancellation propagates.
      */
     private suspend fun <T> runWalletRequest(
+        kind: RequestKind,
         onInterrupted: () -> Result<T>,
-        block: suspend () -> Result<T>
+        block: suspend (gen: Int) -> Result<T>
     ): Result<T> {
-        val deferred: Deferred<Result<T>> = requestScope.async { block() }
+        val gen = generationCounter.incrementAndGet()
+        val deferred: Deferred<Result<T>> = requestScope.async { block(gen) }
         pendingRequest = deferred
+        pendingKind = kind
+        pendingGeneration = gen
         val result: Result<T>? = try {
             withTimeoutOrNull(WALLET_REQUEST_TIMEOUT_MS) { deferred.await() }
         } catch (e: CancellationException) {
@@ -341,26 +420,44 @@ class WalletManager {
                 null
             } else {
                 deferred.cancel()
-                onInterrupted()
+                if (claimResolution(gen)) onInterrupted()
                 throw e
             }
         } finally {
-            if (pendingRequest === deferred) pendingRequest = null
+            if (pendingRequest === deferred) {
+                pendingRequest = null
+                pendingKind = null
+            }
         }
         if (result != null) return result
         // Interrupted: the timeout backstop fired (withTimeoutOrNull
         // returned null) or reconciliation cancelled the request. Make
-        // sure the in-flight request is really stopped, then resolve.
-        // (The request body performs no state writes on its cancellation
-        // path — it rethrows CancellationException — so this resolution
-        // is the single writer of the post-interruption state.)
+        // sure the in-flight request is really stopped, then resolve —
+        // unless the foreground reconciler already claimed this
+        // generation's resolution and wrote the state itself (v1.0.8):
+        // then only the (failure) result is returned, unwritten.
         deferred.cancel()
-        return onInterrupted()
+        return if (claimResolution(gen)) onInterrupted()
+        else Result.failure(IllegalStateException(INTERRUPTED_MESSAGE))
     }
 
     private fun fail(message: String, cause: Throwable? = null): Result<String> {
         _uiState.value = WalletUiState.Error(message)
         return Result.failure(cause ?: IllegalStateException(message))
+    }
+
+    /**
+     * v1.0.8: [fail], generation-guarded — a connect request whose
+     * generation has been resolved (foreground reconciliation) or
+     * superseded by a newer request returns its failure WITHOUT
+     * writing the Error state over the state that replaced it.
+     */
+    private fun failIfCurrent(gen: Int, message: String, cause: Throwable? = null): Result<String> {
+        return if (resolvedGeneration == gen || pendingGeneration != gen) {
+            Result.failure(cause ?: IllegalStateException(message))
+        } else {
+            fail(message, cause)
+        }
     }
 
     private fun restoreConnectedState() {
