@@ -239,7 +239,16 @@ jobs:
 
       - name: Pre-create low-RAM AVD with hw.ramSize=1024 in config.ini
         run: |
-          set -euo pipefail
+          # r10.1: the first v1.0.7 attempt died silently inside this
+          # step (sdkmanager output was piped to /dev/null, and the
+          # evidence dir did not exist yet for the closing tee). This
+          # version creates the evidence dir first, narrates every
+          # sub-step into the job log AND an evidence file, tolerates
+          # sdkmanager noise, and fails only on the final verification
+          # (config.ini exists + ramSize set).
+          mkdir -p fun001-v107-battery-lowram
+          exec > >(tee -a fun001-v107-battery-lowram/avd-create.log) 2>&1
+          set -uo pipefail
           # v1.0.7 verdict tasking: the ram-size input / -memory flag
           # never took downward on this lane (the v1.0.4-v1.0.6 low-RAM
           # AVDs all booted at ~4 GB despite both). Control the RAM
@@ -251,10 +260,23 @@ jobs:
           # this request.
           SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
           AVDM="$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager"
+          echo "sdk_root=$ANDROID_HOME"
+          ls "$ANDROID_HOME/cmdline-tools" || true
+          ls "$ANDROID_HOME/system-images/android-35/google_apis" || echo "API35 google_apis image not preinstalled"
+          java -version 2>&1 | head -2 || echo "no java on PATH"
           yes | "$SDKM" --licenses > /dev/null 2>&1 || true
-          "$SDKM" "system-images;android-35;google_apis;x86_64" > /dev/null
-          echo no | "$AVDM" create avd -n v107-lowram -k "system-images;android-35;google_apis;x86_64" -d pixel_7_pro --force
+          if [ ! -d "$ANDROID_HOME/system-images/android-35/google_apis/x86_64" ]; then
+            echo "installing system-images;android-35;google_apis;x86_64 ..."
+            "$SDKM" "system-images;android-35;google_apis;x86_64" || echo "sdkmanager install rc=$? (continuing; avdmanager will judge)"
+          else
+            echo "system image already present on the runner image"
+          fi
+          echo no | "$AVDM" create avd -n v107-lowram -k "system-images;android-35;google_apis;x86_64" -d pixel_7_pro --force || echo no | "$AVDM" create avd -n v107-lowram -k "system-images;android-35;google_apis;x86_64" --force
           CFG="$HOME/.android/avd/v107-lowram.avd/config.ini"
+          if [ ! -f "$CFG" ]; then
+            echo "FATAL: AVD config.ini was not created"
+            exit 1
+          fi
           if grep -q "^hw.ramSize=" "$CFG"; then
             sed -i 's/^hw.ramSize=.*/hw.ramSize=1024/' "$CFG"
           else
