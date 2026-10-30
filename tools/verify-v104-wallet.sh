@@ -35,6 +35,16 @@
 # VR-12 polls the post-return state for up to 30 s and records the
 # resolution + latency (vr12-notes.txt), then proves the retry
 # affordance recovers the flow.
+# Driver r10.3 (REPORT_V107 diagnostic annex, main's relay of the
+# HAUNT v0.1.15 finding on the identical cure shape): VR-12's
+# observation window is VR12_OBSERVE_S (default 30 s = the SS2.2
+# cell). A diagnostic dispatch may extend it (150 s) to put the
+# 120 s backstop's behaviour on record: every 3 s sample lands in
+# vr12-notes.txt, the grade stays keyed to resolution within 30 s,
+# a late resolution is graded FAIL with its latency named, and the
+# post-resolution recovery connect is recorded in the notes either
+# way. tap_connect_and_complete also works the mock's Authenticate
+# gate if a relaunched wallet sits at it.
 #
 # Any AndroidRuntime FATAL (either package) or any IllegalStateException
 # in a captured logcat window is counted and fails the whole verdict.
@@ -549,6 +559,12 @@ tap_connect_and_complete() { # $1 = evidence tag; from the wallet screen in a
         sleep 4
         satisfy_auth_prompt || true
         break
+      fi
+      if [ "$(fg_pkg)" = "$MOCK" ] && grep -q "AUTHENTICATE" "$TMPD/tcc-poll.xml" && ! sheet_present "$TMPD/tcc-poll.xml"; then
+        log "$tag: wallet sits at its Authenticate gate - authenticating"
+        tap_exact "$TMPD/tcc-poll.xml" "AUTHENTICATE" || true
+        satisfy_auth_prompt || true
+        date +%s > "$AUTH_EPOCH_FILE" || true
       fi
       if [ "$(fg_pkg)" = "$PKG" ] && [ "$(state_of "$TMPD/tcc-poll.xml")" = "connected" ]; then
         log "$tag: connect completed by silent reauthorize (no sheet)"
@@ -1105,10 +1121,12 @@ cell_vr12() {
     # record the resolution + its latency (r9 read twice, 20 s apart,
     # and graded a binary hung/not-hung).
     adb shell am start -W -n "$ACT" >/dev/null 2>&1 || true
-    local elapsed=0 st="working"
-    while [ "$elapsed" -lt 30 ]; do
+    local observe_s="${VR12_OBSERVE_S:-30}" elapsed=0 st="working" samples=""
+    while [ "$elapsed" -lt "$observe_s" ]; do
       sleep 3; elapsed=$((elapsed + 3))
       st="$(vr_state "$TMPD/vr12-poll.xml")"
+      samples="${samples}vr12_sample_${elapsed}s=$st
+"
       if [ "$st" != "working" ] && [ "$st" != "nodump" ]; then break; fi
     done
     cp "$TMPD/vr12-poll.xml" "$OUT/hier-vr12-resolved.xml" 2>/dev/null || true
@@ -1117,6 +1135,9 @@ cell_vr12() {
     {
       echo "vr12_resolution_state=$st"
       echo "vr12_resolution_latency_s=$elapsed"
+      echo "vr12_observe_window_s=$observe_s"
+      printf '%s' "$samples"
+      if [ "$st" != "working" ] && [ "$elapsed" -le 30 ]; then echo "vr12_in_window_resolution=yes"; else echo "vr12_in_window_resolution=no"; fi
       echo "vr12_expectation=v1.0.7 KFC-008: onResume reconciliation cancels the abandoned request after a 5 s grace window -> interrupted Error (TRY AGAIN)"
     } > "$OUT/vr12-notes.txt"
     if [ "$st" = "connected" ]; then result="completed"
@@ -1129,10 +1150,25 @@ cell_vr12() {
     failed-closed)
       # Resolution alone is not the whole cell: the retry affordance
       # must actually recover the flow (TRY AGAIN -> connect succeeds).
+      # r10.3: the recovery result is recorded in vr12-notes.txt either
+      # way, and a resolution that lands OUTSIDE the 30 s cell window
+      # (e.g. the 120 s backstop on a diagnostic 150 s dispatch) is
+      # graded FAIL with its latency named - it is not the designed
+      # in-window resolution.
       if tap_connect_and_complete "vr12-retry"; then
-        vr12="PASS(abandoned mid-approval resolved out of Working to '$res_state' in ${res_latency}s on return (no hang, no crash); recovery connect succeeded)"
+        echo "vr12_post_resolution_connect=PASS (recovery connect after resolution to '$res_state' at ${res_latency}s)" >> "$OUT/vr12-notes.txt"
+        if [ "$res_latency" -le 30 ]; then
+          vr12="PASS(abandoned mid-approval resolved out of Working to '$res_state' in ${res_latency}s on return (no hang, no crash); recovery connect succeeded)"
+        else
+          vr12="FAIL(resolved out of Working only at ${res_latency}s - outside the 30 s window - to '$res_state' (backstop-class resolution; the 5 s grace cancellation did not resolve in-window); post-resolution recovery connect succeeded)"
+        fi
       else
-        vr12="FAIL(resolved out of Working to '$res_state' in ${res_latency}s but the recovery connect failed)"
+        echo "vr12_post_resolution_connect=FAIL (no recovery connect after resolution to '$res_state' at ${res_latency}s)" >> "$OUT/vr12-notes.txt"
+        if [ "$res_latency" -le 30 ]; then
+          vr12="FAIL(resolved out of Working to '$res_state' in ${res_latency}s but the recovery connect failed)"
+        else
+          vr12="FAIL(resolved out of Working only at ${res_latency}s - outside the 30 s window - to '$res_state'; post-resolution recovery connect also failed)"
+        fi
       fi
       ;;
     *)             vr12="FAIL(background/foreground left the connect flow in state '$result')" ;;
