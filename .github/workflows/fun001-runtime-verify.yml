@@ -54,6 +54,7 @@ on:
           - battery
           - battery-webview
           - battery-lowram
+          - lifecycle-api36
           - battery-sweep-api36
           - battery-sweep-api35
           - everything
@@ -102,7 +103,7 @@ jobs:
 
   wallet-lifecycle-api36:
     name: wallet suite LIFECYCLE — API 36 (VR-11/12)
-    if: ${{ inputs.target == 'wallet-all' || inputs.target == 'everything' }}
+    if: ${{ inputs.target == 'wallet-all' || inputs.target == 'everything' || inputs.target == 'lifecycle-api36' }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
