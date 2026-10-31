@@ -82,6 +82,60 @@
 # 120-min job cap cannot eat it after the long VR-12 legs
 # (REPORT_V108 lost the API-35 VR-11 rep exactly that way).
 #
+# Driver r17 (v1.0.12 verdict, REPORT_V112): ONE change — the VR-12S
+# follow-up sign leg loses the r16 obstruction. REPORT_V111 proved
+# on the wire that r16's approve_followup_sign obstructed the very
+# path it was written to serve: it raised the wallet's task itself
+# (foreground_wallet_task, recents card) and then cycled the mock's
+# main-screen AUTHENTICATE gate for the whole 165 s budget, holding
+# the wallet foregrounded on its main activity — when the gate
+# expired and the follow-up's transact fired, no sheet ever surfaced
+# and the wallet logged no connection attempt to the follow-up port
+# (the control, whose intent fired with the app in front, executed
+# its leg fully on the same driver). The mock's scenario activity
+# does not persist in its task after backgrounding, so there is
+# nothing for a driver to raise: each association intent raises the
+# wallet itself, and the only event that ever re-presented a pending
+# sheet across five verdicts was a fresh association intent. r17's
+# helper therefore NEVER foregrounds the wallet, NEVER starts its
+# activity, and NEVER taps its main-screen AUTHENTICATE button (the
+# foreground_wallet_task helper is removed with its only call). It
+# only polls and approves sheets AS THEY SURFACE, in surface order —
+# on the cured build: gate expiry -> attempt 1's intent resurfaces
+# the ZOMBIE sheet (approve it; its late result is generation-
+# suppressed and completes the re-issue's clearance signal) ->
+# attempt 2 fires on its own and its sheet surfaces (approve it) ->
+# the follow-up completes. Acceptance widens accordingly: Connected
+# + >= 1 approval + (a second approval OR the app's own wire marker
+# `sign attempt-N ... outcome=Success` in logcat) — a lone zombie
+# approval followed by a failed sign's restore-to-Connected (VR-9
+# shape) can no longer read as success, and the faulted predecessor
+# (no re-issue markers exist in its binary) cannot pass. The wire
+# grade itself is read from logcat-vr12s-followup.txt at verdict
+# time; the helper's outcome is a completion signal only. Every
+# other cell keeps the r16 choreography unchanged.
+#
+# Driver r16 (v1.0.11 verdict, REPORT_V111): ONE change — the VR-12S
+# follow-up sign leg. v1.0.11 protects the follow-up sign with a
+# zombie-clear GATE (CURE_V111): after the sign-branch resolution, the
+# follow-up sign does not transact until the zombie sheet of the
+# interrupted request clears — and the zombie clears only when its
+# result is delivered, i.e. when its sheet is APPROVED (or dismissed).
+# The r15 leg waited for the follow-up's OWN sheet first, which on
+# the cured build deadlocks the leg (that sheet cannot exist until
+# the zombie is approved) and on the faulted predecessor graded the
+# zombie approval as if it were the follow-up's (REPORT_V110: the
+# driver approved the zombie, whose late result is generation-
+# suppressed, and read the still-Working app as the failure). The
+# leg now approves SEQUENTIALLY — zombie sheet first, then the
+# follow-up's own sheet (approve_followup_sign, approve-all bounded
+# at 4, PASS requires >= 2 approvals AND Connected+pubkey, so a lone
+# zombie approval can never pass the leg) — and files a dedicated
+# follow-up logcat window (logcat-vr12s-followup.txt) carrying the
+# gate's Log.d markers (tag VoidrunnerWallet: zombie gate wait-start
+# / cleared-by-late-result / wait-expired) for wire grading. Every
+# other cell keeps the r15 choreography unchanged.
+#
 # Driver r15 (v1.0.10 cure, REPORT_V109): two lifecycle fixes.
 # (r14 was the v1.0.9 verdict-lane retarget — workflow/action only,
 # no driver change.) (1) The lifecycle order is REVERSED from r13:
@@ -696,6 +750,106 @@ tap_connect_and_complete() { # $1 = evidence tag; from the wallet screen in a
   } > "$OUT/$tag-tcc.txt"
   log "$tag: tap_connect_and_complete done: approvals=$approvals elapsed=${elapsed}s outcome=$outcome"
   wait_for "CONNECTED" 30 "$OUT/hier-$tag-after.xml" && grep -q "$EXPECTED_PUBKEY" "$OUT/hier-$tag-after.xml"
+}
+
+fup_wire_success() { # 0 if logcat already carries the follow-up's own
+  # sign-success marker (v1.0.12 instrumentation, tag VoidrunnerWallet:
+  # "sign attempt-1 gen=N outcome=Success ..." / "sign attempt-2 ...
+  # outcome=Success ..."). The faulted predecessor emits no such
+  # lines at all, so this check is structurally closed to it. Dumped
+  # WITHOUT clearing — the cell's follow-up window stays contiguous.
+  adb logcat -d > "$TMPD/fup-wire.xml" 2>/dev/null || return 1
+  grep -a "VoidrunnerWallet" "$TMPD/fup-wire.xml" 2>/dev/null | grep -aqE "sign attempt-[12] gen=[0-9]+ outcome=Success"
+}
+
+approve_followup_sign() { # $1 = evidence tag; r17 surface-order approvals.
+  # Called by cell_vr12sign AFTER it taps the follow-up SIGN control.
+  # r17 (REPORT_V112; CURE_V112 lane note): this helper NEVER
+  # foregrounds the wallet, NEVER starts its activity, and NEVER taps
+  # its main-screen AUTHENTICATE button — r16 did all three and so
+  # obstructed every post-expiry path in REPORT_V111 (the wallet
+  # parked on its main activity; no sheet surfaced; no connection
+  # attempt logged to the follow-up port). The mock's scenario
+  # activity does not persist in its task after backgrounding; each
+  # association intent raises the wallet itself. So the helper only
+  # polls: when a sheet surfaces (mock foreground with sheet
+  # controls), it approves it in surface order, then satisfies that
+  # approval's own credential prompt if one appears. Surface order
+  # on the cured build (v1.0.12): the gate expires -> attempt 1's
+  # intent resurfaces the ZOMBIE sheet — approve #1 (its late result
+  # is generation-suppressed; it completes the re-issue's clearance
+  # signal, it is NOT the follow-up's completion) -> attempt 1
+  # returns with zero establishments -> attempt 2 fires on the freed
+  # wallet, its sheet surfaces — approve #2 -> the follow-up
+  # completes via attempt 2's own result. If the gate instead clears
+  # by late result inside the window, attempt 1 itself establishes
+  # and its sheet is approve #1 and the last. On the faulted
+  # predecessor (v1.0.11): gate expires -> its single knock surfaces
+  # the zombie -> approve #1 (suppressed) -> the association dies
+  # unestablished and NO re-issue exists -> the follow-up never
+  # completes and the budget ends with the app in Working.
+  # Approve-all, bounded at 4 sheets, inside a 165 s budget (gate
+  # remainder <= 35 s + attempt-1 scenario life + zombie approval +
+  # attempt-2 association + approvals/auth). Acceptance: the app at
+  # Connected+pubkey with >= 1 approval AND (>= 2 approvals OR the
+  # follow-up's own sign-success wire marker present) — a sign that
+  # settles as failure also restores Connected (VR-9 shape), so
+  # state after a lone zombie approval must not read as success.
+  # This outcome is a completion signal only; the verdict grades the
+  # mechanism from logcat-vr12s-followup.txt. Files
+  # hier-<tag>-fup-sheet<N>.xml per approved sheet and <tag>-fup.txt
+  # (approvals / elapsed / outcome).
+  local tag="$1" elapsed=0 approvals=0 outcome="timeout" st_f=""
+  while [ "$elapsed" -lt 165 ]; do
+    if dump_ui "$TMPD/fup-poll.xml"; then
+      if [ "$(fg_pkg)" = "$PKG" ]; then
+        st_f="$(state_of "$TMPD/fup-poll.xml")"
+        if [ "$st_f" = "connected" ] && [ "$approvals" -ge 1 ] && { [ "$approvals" -ge 2 ] || fup_wire_success; }; then
+          outcome="connected"; break
+        fi
+        # App in front, no sheet up: the gate / attempt machinery is
+        # running its course. Leave the devices alone (r17) — the
+        # app's next association intent raises the wallet itself.
+      fi
+      if sheet_present "$TMPD/fup-poll.xml"; then
+        if [ "$approvals" -lt 4 ]; then
+          approvals=$((approvals + 1))
+          cp "$TMPD/fup-poll.xml" "$OUT/hier-$tag-fup-sheet$approvals.xml"
+          snap "shot-$tag-fup-sheet$approvals.png"
+          log "$tag: follow-up sheet #$approvals surfaced at ${elapsed}s; approving (surface order: the zombie first, then attempt 2's own)"
+          if tap_exact "$TMPD/fup-poll.xml" "Approve" || tap_text "$TMPD/fup-poll.xml" "Approve" || tap_exact "$TMPD/fup-poll.xml" "Connect" || tap_text "$TMPD/fup-poll.xml" "Connect"; then
+            sleep 4
+            satisfy_auth_prompt || true
+          else
+            log "$tag: sheet #$approvals present but no approve control matched; continuing to poll"
+            approvals=$((approvals - 1))
+          fi
+        else
+          log "$tag: sheet present but the approval cap (4) is reached; not approving"
+          sleep 3
+        fi
+      fi
+      # r17: NO wallet-foreground branch. If the mock sits in the
+      # foreground on its main screen (no sheet controls), that is
+      # the wallet's own resting state between intents — polling
+      # continues untouched until the app's next intent raises a
+      # sheet or the budget ends.
+    fi
+    sleep 3; elapsed=$((elapsed + 3))
+  done
+  # Final acceptance re-check in the app's window (the last approval
+  # may have returned focus to the app between polls).
+  if [ "$outcome" != "connected" ] && [ "$approvals" -ge 1 ] && [ "$(vr_state "$TMPD/fup-final.xml")" = "connected" ] && { [ "$approvals" -ge 2 ] || fup_wire_success; }; then
+    outcome="connected"
+  fi
+  {
+    echo "fup_tag=$tag"
+    echo "fup_approvals=$approvals"
+    echo "fup_elapsed_s=$elapsed"
+    echo "fup_outcome=$outcome"
+  } > "$OUT/$tag-fup.txt"
+  log "$tag: approve_followup_sign done: approvals=$approvals elapsed=${elapsed}s outcome=$outcome"
+  [ "$outcome" = "connected" ]
 }
 
 # --- shared flows -------------------------------------------------------------------
@@ -1368,7 +1522,8 @@ cell_vr12sign() {
   while [ "$elapsed" -lt 30 ]; do
     sleep 3; elapsed=$((elapsed + 3))
     st="$(vr_state "$TMPD/vr12s-poll.xml")"
-    samples="${samples}vr12s_sample_${elapsed}s=$st\n"
+    samples="${samples}vr12s_sample_${elapsed}s=$st
+"
     if [ "$st" != "working" ] && [ "$st" != "nodump" ]; then break; fi
   done
   cp "$TMPD/vr12s-poll.xml" "$OUT/hier-vr12s-resolved.xml" 2>/dev/null || true
@@ -1377,26 +1532,40 @@ cell_vr12sign() {
     echo "vr12s_resolution_latency_s=$elapsed"
     printf '%s' "$samples"
     echo "vr12s_bar_s=20 (grace 5 s + 15 s; REPORT_V108 cell definition)"
-    echo "vr12s_expectation=v1.0.9 KFC-008 sign branch: reconciler — scoped to the generation pending at backgrounding — restores Connected from sessionPublicKeyBase58 directly; no error, no disconnect"
+    echo "vr12s_expectation=v1.0.12 KFC-008 sign branch: reconciler — scoped to the generation pending at backgrounding — restores Connected from sessionPublicKeyBase58 directly; no error, no disconnect; the follow-up sign consumes the zombie-clear gate (Log.d tag VoidrunnerWallet: zombie gate wait-start / cleared-by-late-result / wait-expired) and completes in-process: on expiry attempt 1 knocks once (its intent resurfaces the zombie sheet), and only if attempt 1 RETURNED with ZERO session establishments and the zombie's late result has arrived does exactly one re-issue — attempt 2 — fire (markers: sign attempt-1 / sign re-issue decision / sign re-issue awaiting zombie clearance / sign re-issue zombie cleared / sign attempt-2 fire / sign attempt-2); driver r17 approves sheets in surface order — zombie first, then attempt 2's own — and never foregrounds the wallet"
   } > "$OUT/vr12s-notes.txt"
   log "vr12s: post-return resolution state=$st after ${elapsed}s (fg=$(fg_pkg))"
   capture_window "vr12s"
   if [ "$st" = "connected" ] && [ "$elapsed" -le 20 ]; then
-    # A further sign must now succeed normally.
+    # A further sign must now succeed. r17: it is worked by
+    # approve_followup_sign — approvals in SURFACE ORDER, zombie
+    # first, and the helper never foregrounds the wallet (r16's
+    # wallet-task raising + main-screen Authenticate cycling
+    # obstructed every post-expiry path in REPORT_V111; the app's
+    # association intents raise the wallet themselves). On the
+    # cured build the follow-up sits behind the zombie-clear gate;
+    # at expiry attempt 1 knocks and resurfaces the zombie sheet —
+    # approving it delivers the zombie's late result (generation-
+    # suppressed; it completes the re-issue's clearance signal) —
+    # and attempt 2 then fires and presents its own sheet.
     auth_fresh_enough
     dump_ui "$TMPD/vr12s-conn2.xml" || true
-    if tap_text "$TMPD/vr12s-conn2.xml" "SIGN TEST MESSAGE" && wait_sheet "$OUT/hier-vr12s-sign2-sheet.xml" 45; then
-      tap_exact "$OUT/hier-vr12s-sign2-sheet.xml" "Approve" || true
-      sleep 3
-      satisfy_auth_prompt || true
-      if [ "$(vr_state "$TMPD/vr12s-after2.xml")" = "connected" ]; then
-        vr12sign="PASS(abandoned sign resolved directly to Connected+pubkey in ${elapsed}s — within the grace+15 s bar, no error/disconnect; a further sign then succeeded)"
+    if tap_text "$TMPD/vr12s-conn2.xml" "SIGN TEST MESSAGE"; then
+      if approve_followup_sign "vr12s"; then
+        vr12sign="PASS(abandoned sign resolved directly to Connected+pubkey in ${elapsed}s — within the grace+15 s bar, no error/disconnect; the follow-up sign then completed in-process behind the zombie-clear gate — surface-order approvals in vr12s-fup.txt, mechanism markers in logcat-vr12s-followup.txt)"
       else
-        vr12sign="FAIL(resolved to Connected in ${elapsed}s but the follow-up sign did not return to Connected)"
+        vr12sign="FAIL(resolved to Connected in ${elapsed}s but the follow-up sign did not complete — see vr12s-fup.txt + logcat-vr12s-followup.txt)"
       fi
     else
-      vr12sign="FAIL(resolved to Connected in ${elapsed}s but the follow-up sign produced no sheet)"
+      vr12sign="FAIL(resolved to Connected in ${elapsed}s but no sign control for the follow-up sign)"
     fi
+    # r17: the follow-up leg's own wire window (gate markers, the
+    # re-issue markers, the follow-up associations, the settlement),
+    # dumped WITHOUT clearing so logcat-vr11.txt keeps spanning it
+    # as in prior verdicts.
+    adb logcat -d > "$OUT/logcat-vr12s-followup.txt" 2>&1 || true
+    scan_logcat "$OUT/logcat-vr12s-followup.txt"
+    grep "VoidrunnerWallet" "$OUT/logcat-vr12s-followup.txt" 2>/dev/null | grep -iE "zombie|sign attempt|sign re-issue" | head -30 >> "$OUT/vr12s-notes.txt" || true
   elif [ "$st" = "connected" ]; then
     vr12sign="FAIL(resolved to Connected only at ${elapsed}s — outside the grace+15 s bar (20 s))"
   else
