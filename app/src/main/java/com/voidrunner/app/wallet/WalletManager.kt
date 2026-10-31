@@ -196,6 +196,62 @@ sealed interface WalletUiState {
  * but does not touch this layer). Gate events are Log.d under
  * [LOG_TAG] (wait-start / cleared-by-late-result / wait-expired) so
  * the verdict grades the gate from its own wire markers.
+ *
+ * v1.0.12 KFC-008 GATED-SIGN RE-ISSUE (REPORT_V111, §2.2 verdict on
+ * v1.0.11 — VR-12(a) PASS ×5, VR-12(b) PASS ×5, resolution half of
+ * (c) PASS ×5, scoping clean, 0 FATALs; VR-12(c)'s follow-up leg
+ * graded NOT-RUN (rig/driver) ×5, NOT a build failure): the gate
+ * engaged in all five reps (wait-start naming the interrupted
+ * generation) and expired at ~27 s — the marker's expiry deadline is
+ * absolute (set + 35 s), so a follow-up reaching the gate seconds
+ * after the interruption observes only the remainder. No rep emitted
+ * cleared-by-late-result, for a rig reason the report wire-proves:
+ * the mock wallet cannot re-present the zombie sheet during the
+ * gate window — its scenario activity does not survive
+ * backgrounding, and across five verdicts the ONLY event that ever
+ * resurfaced a pending sheet was a fresh association intent — the
+ * very thing the gate withholds. So the designed clearance is
+ * unexercisable against this mock inside the window, and v1.0.11's
+ * single post-expiry transact knocks exactly once: in the real
+ * choreography that knock resurfaces the zombie (control-proven in
+ * REPORT_V110: the follow-up's intent is what surfaces the zombie
+ * sheet), the user clears it, the wallet frees — but the knock's
+ * own scenario has already died unestablished, and nothing knocks
+ * again. The delta is therefore the second knock, made safe: a
+ * SIGN request that consumed the zombie gate — and only such a
+ * sign — may re-issue its transact EXACTLY ONCE, and only when
+ * (a) attempt 1 has RETURNED (its association scenario is closed; a
+ * returned scenario cannot establish retroactively — REPORT_V110 /
+ * V111 wire evidence), (b) attempt 1 recorded ZERO session
+ * establishments, tracked from the session layer itself: the
+ * perform functions count invocations of the clientlib `transact`
+ * block, which clientlib runs only after a session is established
+ * and authorized and which is the sole invocation site of the sign
+ * methods — zero invocations means no sheet was ever presented and
+ * no signature can exist from attempt 1, while ANY invocation,
+ * even on a failure return, forbids the re-issue absolutely (an
+ * established session's outcome is definitive and final), and
+ * (c) the zombie's late result has arrived and been
+ * generation-suppressed (the retained marker's late-result signal,
+ * completed by the interrupted request's own wrapper tail) — the
+ * wallet is provably free; if it has not arrived when attempt 1
+ * returns, the wrapper awaits it, bounded by the remainder of the
+ * existing 120 s backstop (the await lives inside the request
+ * async that the backstop's select-and-cancel governs), and if it
+ * never arrives the caller settles with attempt 1's failure —
+ * v1.0.11's floor, never worse. Attempt 2 is an ordinary single
+ * transact: establishes → sheet → the user's decision is final
+ * (success or definitive failure, no attempt 3); dies
+ * unestablished → settle failure (final). The re-issue is a single
+ * guarded branch in [runWalletRequest], evaluated once per
+ * request and consumed on use — exactly-once is structural, not
+ * counted. Signs that did not consume the gate get NO re-issue in
+ * this build. Untouched: the gate itself, claim settlement, the
+ * scoped reconciler, the kind-scoped adapter reset, the 5 s grace,
+ * the 120 s backstop; [performConnect] is byte-identical (measured
+ * at this commit, as before). Decision and attempts are Log.d
+ * under [LOG_TAG] so the verdict grades the re-issue from its own
+ * wire markers.
  */
 class WalletManager {
 
@@ -345,6 +401,18 @@ class WalletManager {
     private class ZombieMarker(val generation: Int) {
         val signal = CompletableDeferred<ZombieClearReason>()
 
+        /**
+         * v1.0.12: completes exactly once, when this generation's
+         * late resolution is observed by its own wrapper tail (see
+         * [noteZombieLateResult]) — the event the gated sign's
+         * re-issue condition (c) awaits. Separate from [signal]:
+         * the marker's own clearance can also fire by EXPIRY, which
+         * frees nobody — only the late result proves the wallet
+         * free. This signal has no expiry of its own; a gated sign
+         * awaiting it is bounded by the request backstop.
+         */
+        val lateResultSignal = CompletableDeferred<Unit>()
+
         @Volatile
         var gateConsumed: Boolean = false
     }
@@ -367,6 +435,23 @@ class WalletManager {
     private var lateResolvedGeneration: Int = 0
 
     /**
+     * v1.0.12: the most recently recorded zombie marker, retained
+     * after the live marker itself clears or expires. The gated
+     * sign's re-issue condition (c) awaits the marker's late-result
+     * signal, and in the choreography that matters the marker has
+     * usually EXPIRED (its 35 s deadline is absolute from set) long
+     * before the zombie's late result arrives — the object must
+     * outlive its own marker slot so the signal can still be
+     * completed by [noteZombieLateResult] and observed by the sign
+     * that consumed the gate (which captured the same object).
+     * Replaced only when a new interruption records a new marker;
+     * requests are serialized by the wrapper, so a retained marker
+     * is never replaced while its gated sign is still in flight.
+     */
+    @Volatile
+    private var lastZombieMarker: ZombieMarker? = null
+
+    /**
      * v1.0.11: record the zombie-outstanding marker for [gen]. Called
      * at every interruption resolution site (the reconciler's claim
      * block, the wrapper's interrupted tail, the caller-cancelled
@@ -382,6 +467,10 @@ class WalletManager {
             if (zombieMarker?.generation == gen) return
             if (lateResolvedGeneration == gen) return
             zombieMarker = marker
+            // v1.0.12: retain the marker object past its own slot so
+            // its late-result signal remains completable and
+            // observable after expiry (see lastZombieMarker).
+            lastZombieMarker = marker
         }
         Log.d(LOG_TAG, "zombie marker set gen=$gen")
         requestScope.launch {
@@ -399,6 +488,15 @@ class WalletManager {
      * fires first (EXPIRED). Any outcome of the late request —
      * success, failure, error, cancellation delivery — clears: what
      * frees the wallet is the zombie session closing, not the result.
+     *
+     * Deadline semantics, precisely (v1.0.12 record): the marker's
+     * expiry deadline is ABSOLUTE — set + [ZOMBIE_MARKER_EXPIRY_MS].
+     * A gate that starts seconds after the interruption therefore
+     * observes only the REMAINDER of that deadline (REPORT_V111:
+     * ~27 s waits against the gate's 35 s local bound, because the
+     * marker's timer, armed ~8 s earlier at the interruption,
+     * completes the signal first). The two bounds race by design;
+     * whichever fires, the gate proceeds exactly once.
      */
     private fun clearZombieMarker(gen: Int, reason: ZombieClearReason) {
         val marker = synchronized(zombieLock) {
@@ -416,6 +514,30 @@ class WalletManager {
     }
 
     /**
+     * v1.0.12: record that generation [gen]'s late resolution has
+     * arrived — called from the generation-suppressed tail of that
+     * generation's own request wrapper (the finally in
+     * [runWalletRequest]), the same hook that clears the marker
+     * with LATE_RESULT. Completes the retained marker's late-result
+     * signal, waking a gated follow-up sign that is awaiting its
+     * re-issue condition (c). Self-guarded by generation: a marker
+     * exists only for a claim-settled generation, and that
+     * generation's wrapper tail runs only when its parked clientlib
+     * call actually returns, so a completion here is always the
+     * late resolution of the named zombie — never a normal first
+     * completion. Unlike [clearZombieMarker] this does not require
+     * the marker to still occupy the live slot: after expiry the
+     * slot is empty but the retained object (see [lastZombieMarker])
+     * still carries the signal.
+     */
+    private fun noteZombieLateResult(gen: Int) {
+        val marker = synchronized(zombieLock) {
+            lastZombieMarker?.takeIf { it.generation == gen }
+        } ?: return
+        marker.lateResultSignal.complete(Unit)
+    }
+
+    /**
      * v1.0.11: the sign-path gate. With no marker outstanding this
      * returns immediately — marker absent → zero wait, so an ordinary
      * sign is never delayed. Otherwise the FIRST sign after the
@@ -428,8 +550,14 @@ class WalletManager {
      * transact of its own and touches no state: the caller proceeds
      * to its single transact exactly as before, so no sign can ever
      * be double-submitted by waiting.
+     *
+     * v1.0.12: returns the consumed marker (null when no gate was
+     * consumed — no marker outstanding, or an earlier sign already
+     * consumed it) so [runWalletRequest] can evaluate the gated
+     * sign's exactly-one re-issue against the very marker it waited
+     * on (see [maybeReissueSign]).
      */
-    private suspend fun awaitZombieClearGate() {
+    private suspend fun awaitZombieClearGate(): ZombieMarker? {
         val marker = synchronized(zombieLock) {
             val current = zombieMarker
             if (current == null || current.gateConsumed) null
@@ -437,7 +565,7 @@ class WalletManager {
                 current.gateConsumed = true
                 current
             }
-        } ?: return
+        } ?: return null
         val waitStartMs = System.currentTimeMillis()
         Log.d(LOG_TAG, "zombie gate wait-start zombieGen=${marker.generation}")
         val reason = withTimeoutOrNull(ZOMBIE_GATE_WAIT_MS) { marker.signal.await() }
@@ -456,6 +584,7 @@ class WalletManager {
             // timer (or raced it): make sure the marker is gone.
             if (reason == null) clearZombieMarker(marker.generation, ZombieClearReason.EXPIRED)
         }
+        return marker
     }
 
     /** Get/set the MWA auth token so it can be persisted across restarts. */
@@ -608,18 +737,26 @@ class WalletManager {
      * Ask the wallet to sign an arbitrary message (used for sign-in and for
      * the JS bridge's `signMessage`). Returns the Base58 signature.
      */
-    suspend fun signMessage(sender: ActivityResultSender, message: String): Result<String> =
-        runWalletRequest(
+    suspend fun signMessage(sender: ActivityResultSender, message: String): Result<String> {
+        // v1.0.12: session-establishment counter for this request,
+        // incremented by the perform function at the session layer
+        // (see performSignMessage) and read by the wrapper's gated
+        // re-issue evaluation — the no-double-submit condition (b).
+        val establishments = AtomicInteger(0)
+        return runWalletRequest(
             RequestKind.SIGN,
             onInterrupted = {
                 restoreConnectedState()
                 Result.failure(IllegalStateException(INTERRUPTED_MESSAGE))
-            }
-        ) { performSignMessage(sender, message) }
+            },
+            signEstablishments = establishments
+        ) { performSignMessage(sender, message, establishments) }
+    }
 
     private suspend fun performSignMessage(
         sender: ActivityResultSender,
-        message: String
+        message: String,
+        sessionEstablishments: AtomicInteger
     ): Result<String> = withContext(Dispatchers.IO) {
         _uiState.value = WalletUiState.Working
         // v1.0.9: capture the adapter at entry — an interruption
@@ -628,6 +765,18 @@ class WalletManager {
         val adapter = walletAdapter
         val result = runCatching {
             adapter.transact(sender) { authResult ->
+                // v1.0.12: reaching this block IS a session
+                // establishment, recorded at the session layer:
+                // clientlib invokes the transact block only after
+                // the association session is established and
+                // authorized, and this block is the sole invocation
+                // site of the sign method below — so a count of
+                // zero after the transact returns proves no sheet
+                // was ever presented and no signature can exist
+                // from the attempt (the gated re-issue's condition
+                // (b); see the class header). Counted, never
+                // inferred from timing.
+                sessionEstablishments.incrementAndGet()
                 val account = authResult.accounts.first().publicKey
                 signMessagesDetached(
                     arrayOf(message.toByteArray()),
@@ -668,24 +817,35 @@ class WalletManager {
     suspend fun signAndSendTransactions(
         sender: ActivityResultSender,
         serializedTransactions: List<ByteArray>
-    ): Result<List<String>> =
-        runWalletRequest(
+    ): Result<List<String>> {
+        // v1.0.12: session-establishment counter, as in signMessage.
+        val establishments = AtomicInteger(0)
+        return runWalletRequest(
             RequestKind.SIGN,
             onInterrupted = {
                 restoreConnectedState()
                 Result.failure(IllegalStateException(INTERRUPTED_MESSAGE))
-            }
-        ) { performSignAndSend(sender, serializedTransactions) }
+            },
+            signEstablishments = establishments
+        ) { performSignAndSend(sender, serializedTransactions, establishments) }
+    }
 
     private suspend fun performSignAndSend(
         sender: ActivityResultSender,
-        serializedTransactions: List<ByteArray>
+        serializedTransactions: List<ByteArray>,
+        sessionEstablishments: AtomicInteger
     ): Result<List<String>> = withContext(Dispatchers.IO) {
         _uiState.value = WalletUiState.Working
         // v1.0.9: capture the adapter at entry, as in performSignMessage.
         val adapter = walletAdapter
         val result = runCatching {
             adapter.transact(sender) {
+                // v1.0.12: session establishment, recorded at the
+                // session layer — see performSignMessage. The sign
+                // method invoked below is this block's only other
+                // act, so the count is the attempt's establishment
+                // truth, not a timing inference.
+                sessionEstablishments.incrementAndGet()
                 signAndSendTransactions(serializedTransactions.toTypedArray())
             }
         }.getOrElse { e ->
@@ -868,6 +1028,7 @@ class WalletManager {
     private suspend fun <T> runWalletRequest(
         kind: RequestKind,
         onInterrupted: () -> Result<T>,
+        signEstablishments: AtomicInteger? = null,
         block: suspend (gen: Int) -> Result<T>
     ): Result<T> {
         val gen = generationCounter.incrementAndGet()
@@ -880,8 +1041,19 @@ class WalletManager {
                 // exactly one transact is ever issued per request,
                 // after the wait. Connect requests are never gated
                 // (their refire loop is their own cure).
-                if (kind == RequestKind.SIGN) awaitZombieClearGate()
-                block(gen)
+                // v1.0.12: the gate hands back the marker it
+                // consumed, and a gated sign's returned first attempt
+                // is evaluated for the exactly-one re-issue (class
+                // header; see maybeReissueSign). A sign that consumed
+                // no gate — and every connect — runs block exactly
+                // once, exactly as before.
+                val gateMarker = if (kind == RequestKind.SIGN) awaitZombieClearGate() else null
+                val firstResult = block(gen)
+                if (gateMarker == null) {
+                    firstResult
+                } else {
+                    maybeReissueSign(gen, gateMarker, signEstablishments, firstResult) { block(gen) }
+                }
             } finally {
                 // v1.0.11 zombie-clear hook: this finally is the
                 // generation-suppressed tail of THIS generation — it
@@ -898,6 +1070,15 @@ class WalletManager {
                 // generation) and this is a no-op.
                 if (resolvedGeneration == gen) lateResolvedGeneration = gen
                 clearZombieMarker(gen, ZombieClearReason.LATE_RESULT)
+                // v1.0.12: the same arrival completes the retained
+                // marker's late-result signal — the event a gated
+                // follow-up sign's re-issue condition (c) awaits.
+                // It must fire even when the marker itself already
+                // expired out of the live slot (in the resurfaced-
+                // zombie choreography that is the usual case), so
+                // it goes through the retained reference, not the
+                // live marker (see noteZombieLateResult).
+                noteZombieLateResult(gen)
             }
         }
         pendingRequest = deferred
@@ -969,6 +1150,97 @@ class WalletManager {
         return if (claimResolution(gen)) onInterrupted()
         else Result.failure(IllegalStateException(INTERRUPTED_MESSAGE))
     }
+
+    /**
+     * v1.0.12: the gated sign's exactly-one re-issue evaluation
+     * (class header). Runs inside the request async, after attempt
+     * 1 ([firstResult]) has RETURNED — condition (a): a returned
+     * transact's association scenario is closed and cannot
+     * establish retroactively (REPORT_V110/V111 wire evidence).
+     * The re-issue fires iff attempt 1 failed AND attempt 1
+     * recorded ZERO session establishments — condition (b), read
+     * from the session layer's own counter ([signEstablishments],
+     * incremented only inside the clientlib transact block, the
+     * sole invocation site of the sign methods): zero proves no
+     * sheet was ever presented and no signature can exist from
+     * attempt 1, while ANY establishment makes attempt 1's outcome
+     * definitive and final — AND the zombie's late result has
+     * arrived — condition (c), [marker]'s late-result signal,
+     * completed by the interrupted request's own wrapper tail when
+     * its result was delivered and generation-suppressed, which is
+     * what proves the wallet free. If (c) has not arrived when
+     * attempt 1 returns, it is awaited here, bounded by the
+     * remainder of the wrapper's 120 s backstop: this async is the
+     * one the backstop's select-and-cancel governs and the await
+     * is cooperative, so the backstop — or a reconciler claim
+     * against this generation — unwinds it exactly as it unwinds
+     * attempt 1, the wrapper's interrupted tail settles the
+     * caller, and attempt 2 never fires. If the signal never
+     * completes within the backstop, the caller settles with
+     * attempt 1's failure: v1.0.11's floor, never worse.
+     *
+     * Exactly-once is structural: a single guarded branch, run
+     * once per request generation, invoking [secondAttempt] at
+     * most once and returning its result directly — no loop, no
+     * recursion, no path re-enters this evaluation. Attempt 2 is
+     * final whatever it does: establishes → the user's decision
+     * on its sheet is the result; dies unestablished → its
+     * failure stands.
+     *
+     * A missing counter (defensive only — every SIGN entry point
+     * passes one) reads as establishments unknown, which is not
+     * zero, and forbids the re-issue: the failure direction is
+     * always towards the pre-v1.0.12 single-transact behaviour.
+     */
+    private suspend fun <T> maybeReissueSign(
+        gen: Int,
+        marker: ZombieMarker,
+        signEstablishments: AtomicInteger?,
+        firstResult: Result<T>,
+        secondAttempt: suspend () -> Result<T>
+    ): Result<T> {
+        val establishments = signEstablishments?.get()
+        Log.d(
+            LOG_TAG,
+            "sign attempt-1 gen=$gen outcome=${outcomeClass(firstResult)} " +
+                "establishments=${establishments ?: -1}"
+        )
+        val zombieCleared = marker.lateResultSignal.isCompleted
+        val reissue = firstResult.isFailure && establishments == 0
+        Log.d(
+            LOG_TAG,
+            "sign re-issue decision gen=$gen attempt1Returned=true " +
+                "attempt1Failed=${firstResult.isFailure} establishments=${establishments ?: -1} " +
+                "zombieCleared=$zombieCleared reissue=$reissue"
+        )
+        if (!reissue) return firstResult
+        if (!zombieCleared) {
+            Log.d(
+                LOG_TAG,
+                "sign re-issue awaiting zombie clearance gen=$gen zombieGen=${marker.generation}"
+            )
+            val waitStartMs = System.currentTimeMillis()
+            marker.lateResultSignal.await()
+            Log.d(
+                LOG_TAG,
+                "sign re-issue zombie cleared gen=$gen zombieGen=${marker.generation} " +
+                    "waitedMs=${System.currentTimeMillis() - waitStartMs}"
+            )
+        }
+        Log.d(LOG_TAG, "sign attempt-2 fire gen=$gen zombieGen=${marker.generation}")
+        val secondResult = secondAttempt()
+        Log.d(
+            LOG_TAG,
+            "sign attempt-2 gen=$gen outcome=${outcomeClass(secondResult)} " +
+                "establishments=${signEstablishments?.get() ?: -1}"
+        )
+        return secondResult
+    }
+
+    /** Wire-marker outcome class for a wallet Result (v1.0.12 instrumentation). */
+    private fun outcomeClass(result: Result<*>): String =
+        if (result.isSuccess) "Success"
+        else "Failure(${result.exceptionOrNull()?.javaClass?.simpleName ?: "unknown"})"
 
     private fun fail(message: String, cause: Throwable? = null): Result<String> {
         _uiState.value = WalletUiState.Error(message)
