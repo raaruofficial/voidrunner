@@ -1,4 +1,4 @@
-name: VOIDRUNNER v1.0.10 wallet-suite job
+name: VOIDRUNNER v1.0.10 wallet-suite job (REPORT_V111 control)
 description: >-
   One cell of the SOLANA RESOURCES BINDING §2.2 wallet verdict: builds the
   pinned Mock MWA Wallet from source, boots a PIN-locked AVD on the
@@ -109,7 +109,7 @@ runs:
     - name: Run wallet suite on PIN-locked AVD (API ${{ inputs.api-level }})
       uses: reactivecircus/android-emulator-runner@v2
       env:
-        FUN001_OUT: fun001-v110-wallet-evidence
+        FUN001_OUT: fun001-v111ctl-wallet-evidence
         SUITE: ${{ inputs.suite }}
         VR12_OBSERVE_S: ${{ inputs.vr12-observe-s }}
         VR_APK: ${{ github.workspace }}/voidrunner-sealed.apk
@@ -133,6 +133,6 @@ runs:
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: fun001-v110-wallet-${{ inputs.suite }}-api${{ inputs.api-level }}
-        path: fun001-v110-wallet-evidence
+        name: fun001-v111ctl-wallet-${{ inputs.suite }}-api${{ inputs.api-level }}
+        path: fun001-v111ctl-wallet-evidence
         if-no-files-found: warn

@@ -1,4 +1,4 @@
-name: FUN-001 runtime verify (cured v1.0.10)
+name: FUN-001 runtime verify (REPORT_V111 CONTROL — sealed v1.0.10)
 
 # v1.0.6 verification lane — the FULL §2.2 candidate-verdict run against
 # the sealed v1.0.6 binary (commit 90c5131: v1.0.5 + KFC-006 Base58
@@ -39,8 +39,13 @@ name: FUN-001 runtime verify (cured v1.0.10)
 # app signals clean) and is SUBSUMED by VR-1/VR-11; it is not re-run.
 #
 # Every job is its own runner (the v1.0.3 combined matrix starved).
-# Every job hash-gates the sealed artefact (Android CI 41003669903,
+# Every job hash-gates the sealed artefact (Android CI 41161225383,
 # artefact 13027176684, sha256 eddbda32...82e64) before any install.
+# This ref is the REPORT_V111 CONTROL pinning: the sealed v1.0.10 —
+# REPORT_V110 failed its VR-12(c) follow-up leg x5; on driver r16 it
+# must fail the same leg the same way (resolution restores
+# Connected+pubkey; the follow-up sign never completes on sequential
+# approvals) before any v1.0.11 pass is trusted.
 
 on:
   workflow_dispatch:
@@ -181,7 +186,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          mkdir -p artefact fun001-v110-battery-webview
+          mkdir -p artefact fun001-v111ctl-battery-webview
           gh api "repos/${{ github.repository }}/actions/artifacts/${ARTEFACT_ID}/zip" > artefact.zip
           unzip -o artefact.zip -d artefact
           ls -la artefact
@@ -190,7 +195,7 @@ jobs:
             echo "artefact_id=${ARTEFACT_ID}"
             echo "expected_sha256=${EXPECTED_SHA256}"
             echo "actual_sha256=${ACTUAL}"
-          } | tee fun001-v110-battery-webview/hash-verification.txt
+          } | tee fun001-v111ctl-battery-webview/hash-verification.txt
           if [ "$ACTUAL" != "$EXPECTED_SHA256" ]; then
             echo "HASH MISMATCH — lane aborts before install"
             exit 1
@@ -204,18 +209,18 @@ jobs:
           target: google_apis
           arch: x86_64
           profile: pixel_7_pro
-          avd-name: v110-webview
+          avd-name: v111ctl-webview
           force-avd-creation: true
           emulator-boot-timeout: 1200
           emulator-options: -no-window
-          script: APK_PATH=$PWD/artefact/app-release.apk FUN001_OUT=$PWD/fun001-v110-battery-webview FUN001_PHASES=AC FUN001_VERSION_STAMP='${{ env.VERSION_STAMP }}' bash tools/verify-fun001.sh
+          script: APK_PATH=$PWD/artefact/app-release.apk FUN001_OUT=$PWD/fun001-v111ctl-battery-webview FUN001_PHASES=AC FUN001_VERSION_STAMP='${{ env.VERSION_STAMP }}' bash tools/verify-fun001.sh
 
       - name: Upload battery-webview evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: fun001-v110-battery-webview
-          path: fun001-v110-battery-webview/
+          name: fun001-v111ctl-battery-webview
+          path: fun001-v111ctl-battery-webview/
           retention-days: 90
           if-no-files-found: warn
 
@@ -245,7 +250,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          mkdir -p artefact fun001-v110-battery-lowram
+          mkdir -p artefact fun001-v111ctl-battery-lowram
           gh api "repos/${{ github.repository }}/actions/artifacts/${ARTEFACT_ID}/zip" > artefact.zip
           unzip -o artefact.zip -d artefact
           ls -la artefact
@@ -254,7 +259,7 @@ jobs:
             echo "artefact_id=${ARTEFACT_ID}"
             echo "expected_sha256=${EXPECTED_SHA256}"
             echo "actual_sha256=${ACTUAL}"
-          } | tee fun001-v110-battery-lowram/hash-verification.txt
+          } | tee fun001-v111ctl-battery-lowram/hash-verification.txt
           if [ "$ACTUAL" != "$EXPECTED_SHA256" ]; then
             echo "HASH MISMATCH — lane aborts before install"
             exit 1
@@ -278,8 +283,8 @@ jobs:
           # low-RAM AVDs booted at ~4 GB despite both), so the RAM is set
           # in config.ini and the job device-info.txt (/proc/meminfo) is
           # the grading measurement — the cell runs only on ~1 GB.
-          mkdir -p fun001-v110-battery-lowram "$ANDROID_AVD_HOME"
-          exec > >(tee -a fun001-v110-battery-lowram/avd-create.log) 2>&1
+          mkdir -p fun001-v111ctl-battery-lowram "$ANDROID_AVD_HOME"
+          exec > >(tee -a fun001-v111ctl-battery-lowram/avd-create.log) 2>&1
           set -uo pipefail
           SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
           AVDM="$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager"
@@ -291,25 +296,25 @@ jobs:
           else
             echo "system image already present"
           fi
-          echo no | "$AVDM" create avd -n v110-lowram -k "system-images;android-35;google_apis;x86_64" -d pixel_7_pro --force || echo "avdmanager rc=$?"
+          echo no | "$AVDM" create avd -n v111ctl-lowram -k "system-images;android-35;google_apis;x86_64" -d pixel_7_pro --force || echo "avdmanager rc=$?"
           "$AVDM" list avd || true
           ls -la "$ANDROID_AVD_HOME" || true
-          CFG="$ANDROID_AVD_HOME/v110-lowram.avd/config.ini"
+          CFG="$ANDROID_AVD_HOME/v111ctl-lowram.avd/config.ini"
           if [ ! -f "$CFG" ]; then
-            FOUND="$(find "$HOME" "$ANDROID_HOME" -name 'v110-lowram.avd' -type d 2>/dev/null | head -1)"
+            FOUND="$(find "$HOME" "$ANDROID_HOME" -name 'v111ctl-lowram.avd' -type d 2>/dev/null | head -1)"
             if [ -n "$FOUND" ]; then CFG="$FOUND/config.ini"; fi
           fi
           if [ ! -f "$CFG" ]; then
             echo "avdmanager output not found - hand-writing the AVD"
-            mkdir -p "$ANDROID_AVD_HOME/v110-lowram.avd"
-            echo "avd.ini.encoding=UTF-8" > "$ANDROID_AVD_HOME/v110-lowram.ini"
-            echo "path=$ANDROID_AVD_HOME/v110-lowram.avd" >> "$ANDROID_AVD_HOME/v110-lowram.ini"
-            echo "path.rel=avd/v110-lowram.avd" >> "$ANDROID_AVD_HOME/v110-lowram.ini"
-            echo "target=android-35" >> "$ANDROID_AVD_HOME/v110-lowram.ini"
+            mkdir -p "$ANDROID_AVD_HOME/v111ctl-lowram.avd"
+            echo "avd.ini.encoding=UTF-8" > "$ANDROID_AVD_HOME/v111ctl-lowram.ini"
+            echo "path=$ANDROID_AVD_HOME/v111ctl-lowram.avd" >> "$ANDROID_AVD_HOME/v111ctl-lowram.ini"
+            echo "path.rel=avd/v111ctl-lowram.avd" >> "$ANDROID_AVD_HOME/v111ctl-lowram.ini"
+            echo "target=android-35" >> "$ANDROID_AVD_HOME/v111ctl-lowram.ini"
             : > "$CFG"
-          echo "AvdId=v110-lowram" >> "$CFG"
+          echo "AvdId=v111ctl-lowram" >> "$CFG"
           echo "abi.type=x86_64" >> "$CFG"
-          echo "avd.ini.displayname=v110-lowram" >> "$CFG"
+          echo "avd.ini.displayname=v111ctl-lowram" >> "$CFG"
           echo "disk.dataPartition.size=6442450944" >> "$CFG"
           echo "hw.accelerometer=yes" >> "$CFG"
           echo "hw.audioInput=yes" >> "$CFG"
@@ -362,7 +367,7 @@ jobs:
             echo "avd_config_ini=$CFG"
             grep -E "^hw.ramSize=" "$CFG" || true
             grep -E "^hw.device.name=|^image.sysdir.1=" "$CFG" || true
-          } | tee fun001-v110-battery-lowram/avd-config.txt
+          } | tee fun001-v111ctl-battery-lowram/avd-config.txt
 
       - name: Low-RAM run on API 35 (1024 MB, phases A+B)
         env:
@@ -373,18 +378,18 @@ jobs:
           target: google_apis
           arch: x86_64
           profile: pixel_7_pro
-          avd-name: v110-lowram
+          avd-name: v111ctl-lowram
           force-avd-creation: false
           emulator-boot-timeout: 1200
           emulator-options: -no-window
-          script: APK_PATH=$PWD/artefact/app-release.apk FUN001_OUT=$PWD/fun001-v110-battery-lowram FUN001_PHASES=AB FUN001_VERSION_STAMP='${{ env.VERSION_STAMP }}' bash tools/verify-fun001.sh
+          script: APK_PATH=$PWD/artefact/app-release.apk FUN001_OUT=$PWD/fun001-v111ctl-battery-lowram FUN001_PHASES=AB FUN001_VERSION_STAMP='${{ env.VERSION_STAMP }}' bash tools/verify-fun001.sh
 
       - name: Upload battery-lowram evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: fun001-v110-battery-lowram
-          path: fun001-v110-battery-lowram/
+          name: fun001-v111ctl-battery-lowram
+          path: fun001-v111ctl-battery-lowram/
           retention-days: 90
           if-no-files-found: warn
 
@@ -414,7 +419,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          mkdir -p artefact fun001-v110-battery-sweep-api36
+          mkdir -p artefact fun001-v111ctl-battery-sweep-api36
           gh api "repos/${{ github.repository }}/actions/artifacts/${ARTEFACT_ID}/zip" > artefact.zip
           unzip -o artefact.zip -d artefact
           ls -la artefact
@@ -423,7 +428,7 @@ jobs:
             echo "artefact_id=${ARTEFACT_ID}"
             echo "expected_sha256=${EXPECTED_SHA256}"
             echo "actual_sha256=${ACTUAL}"
-          } | tee fun001-v110-battery-sweep-api36/hash-verification.txt
+          } | tee fun001-v111ctl-battery-sweep-api36/hash-verification.txt
           if [ "$ACTUAL" != "$EXPECTED_SHA256" ]; then
             echo "HASH MISMATCH — lane aborts before install"
             exit 1
@@ -437,18 +442,18 @@ jobs:
           target: google_apis
           arch: x86_64
           profile: pixel_7_pro
-          avd-name: v110-sweep36
+          avd-name: v111ctl-sweep36
           force-avd-creation: true
           emulator-boot-timeout: 1200
           emulator-options: -no-window
-          script: APK_PATH=$PWD/artefact/app-release.apk FUN001_OUT=$PWD/fun001-v110-battery-sweep-api36 FUN001_PHASES=AB FUN001_VERSION_STAMP='${{ env.VERSION_STAMP }}' bash tools/verify-fun001.sh
+          script: APK_PATH=$PWD/artefact/app-release.apk FUN001_OUT=$PWD/fun001-v111ctl-battery-sweep-api36 FUN001_PHASES=AB FUN001_VERSION_STAMP='${{ env.VERSION_STAMP }}' bash tools/verify-fun001.sh
 
       - name: Upload battery-sweep-api36 evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: fun001-v110-battery-sweep-api36
-          path: fun001-v110-battery-sweep-api36/
+          name: fun001-v111ctl-battery-sweep-api36
+          path: fun001-v111ctl-battery-sweep-api36/
           retention-days: 90
           if-no-files-found: warn
 
@@ -478,7 +483,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          mkdir -p artefact fun001-v110-battery-sweep-api35
+          mkdir -p artefact fun001-v111ctl-battery-sweep-api35
           gh api "repos/${{ github.repository }}/actions/artifacts/${ARTEFACT_ID}/zip" > artefact.zip
           unzip -o artefact.zip -d artefact
           ls -la artefact
@@ -487,7 +492,7 @@ jobs:
             echo "artefact_id=${ARTEFACT_ID}"
             echo "expected_sha256=${EXPECTED_SHA256}"
             echo "actual_sha256=${ACTUAL}"
-          } | tee fun001-v110-battery-sweep-api35/hash-verification.txt
+          } | tee fun001-v111ctl-battery-sweep-api35/hash-verification.txt
           if [ "$ACTUAL" != "$EXPECTED_SHA256" ]; then
             echo "HASH MISMATCH — lane aborts before install"
             exit 1
@@ -501,17 +506,17 @@ jobs:
           target: google_apis
           arch: x86_64
           profile: pixel_7_pro
-          avd-name: v110-sweep35
+          avd-name: v111ctl-sweep35
           force-avd-creation: true
           emulator-boot-timeout: 1200
           emulator-options: -no-window
-          script: APK_PATH=$PWD/artefact/app-release.apk FUN001_OUT=$PWD/fun001-v110-battery-sweep-api35 FUN001_VERSION_STAMP='${{ env.VERSION_STAMP }}' bash tools/verify-fun001.sh
+          script: APK_PATH=$PWD/artefact/app-release.apk FUN001_OUT=$PWD/fun001-v111ctl-battery-sweep-api35 FUN001_VERSION_STAMP='${{ env.VERSION_STAMP }}' bash tools/verify-fun001.sh
 
       - name: Upload battery-sweep-api35 evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: fun001-v110-battery-sweep-api35
-          path: fun001-v110-battery-sweep-api35/
+          name: fun001-v111ctl-battery-sweep-api35
+          path: fun001-v111ctl-battery-sweep-api35/
           retention-days: 90
           if-no-files-found: warn
