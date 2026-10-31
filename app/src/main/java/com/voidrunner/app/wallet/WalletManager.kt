@@ -161,6 +161,41 @@ sealed interface WalletUiState {
  * byte-preserved: VR-12(b) passed ×3 with exactly that choreography,
  * and those resets fire only inside performConnect, which the sign
  * paths never enter.
+ *
+ * v1.0.11 KFC-008 ZOMBIE-CLEAR GATE (REPORT_V110, §2.2 verdict on
+ * v1.0.10 — VR-12(a) PASS ×5, VR-12(b) PASS ×5, VR-12(c) FAIL ×5;
+ * mechanism CORRECTED by that report's re-read of REPORT_V108's own
+ * artefacts, superseding the v1.0.10 attribution above): a follow-up
+ * `transact` creates a fresh association scenario on EVERY build —
+ * the adapter reset never forced it, and v1.0.8's historical (c)
+ * PASS was the zombie's late result landing on its never-claim-
+ * settled original caller, an accident claim settlement (correctly,
+ * per the estate skill) eliminates. The true layer: while the wallet
+ * still holds the ZOMBIE sheet of a just-interrupted request, its
+ * single-task intent handler swallows the follow-up transact's
+ * association intent — no server starts, connects are ECONNREFUSED
+ * for the scenario's life, the follow-up never establishes. The
+ * zombie clears when its result is delivered / its session closes.
+ * The connect branch survives the same swallow via its refire loop;
+ * the sign path must NOT get a refire loop (sign-and-send is not
+ * idempotent — a re-issued sign whose first attempt established late
+ * could double-submit). The cure is therefore a bounded WAIT, not a
+ * retry: an interruption resolution records a zombie-outstanding
+ * marker for its generation; the marker clears when the interrupted
+ * request's late resolution arrives (hooked in the generation-
+ * suppressed tail of its own request wrapper — see
+ * [runWalletRequest]) or on a bounded expiry timer; and the FIRST
+ * sign request after an interruption awaits that clearance —
+ * bounded by the association budget (~35 s, inside the 120 s
+ * backstop) — before issuing its SINGLE transact exactly as before.
+ * On expiry it proceeds anyway: pre-v1.0.11 behaviour is the floor.
+ * The gate waits only: it claims nothing, settles nothing, writes no
+ * connection state; with no marker outstanding it is a no-op, so an
+ * ordinary sign is never delayed. The v1.0.10 kind-scoped adapter
+ * reset stands as harmless hygiene (it preserves every v1.0.9 pass
+ * but does not touch this layer). Gate events are Log.d under
+ * [LOG_TAG] (wait-start / cleared-by-late-result / wait-expired) so
+ * the verdict grades the gate from its own wire markers.
  */
 class WalletManager {
 
@@ -291,6 +326,137 @@ class WalletManager {
      */
     @Volatile
     private var pendingClaimSignal: CompletableDeferred<Unit>? = null
+
+    /**
+     * v1.0.11 zombie-clear gate (class header): why a generation's
+     * zombie marker cleared — the interrupted request's late
+     * resolution arrived, or the bounded expiry fired first.
+     */
+    private enum class ZombieClearReason { LATE_RESULT, EXPIRED }
+
+    /**
+     * v1.0.11: the zombie-outstanding marker for one interrupted
+     * generation. [signal] completes exactly once, with the clear
+     * reason; [gateConsumed] is set by the first SIGN request that
+     * waits on this marker, so exactly one sign is ever gated per
+     * interruption (subsequent signs are ungated even if the zombie
+     * is somehow still outstanding after that wait).
+     */
+    private class ZombieMarker(val generation: Int) {
+        val signal = CompletableDeferred<ZombieClearReason>()
+
+        @Volatile
+        var gateConsumed: Boolean = false
+    }
+
+    private val zombieLock = Any()
+
+    @Volatile
+    private var zombieMarker: ZombieMarker? = null
+
+    /**
+     * v1.0.11: the last generation whose late resolution was observed
+     * by its wrapper's tail AFTER a claim had already settled it
+     * (see the finally hook in [runWalletRequest]). Guards the claim/
+     * completion race: if the late result lands in the same instant
+     * the claim settles and the tail runs before the resolution site
+     * records the marker, the marker is never recorded at all — the
+     * zombie it would have named is already gone.
+     */
+    @Volatile
+    private var lateResolvedGeneration: Int = 0
+
+    /**
+     * v1.0.11: record the zombie-outstanding marker for [gen]. Called
+     * at every interruption resolution site (the reconciler's claim
+     * block, the wrapper's interrupted tail, the caller-cancelled
+     * claim path) — idempotent per generation, so the sites may all
+     * fire for one interruption without stacking markers or resetting
+     * the expiry. The marker also arms its own bounded expiry: if
+     * the late resolution never arrives, the expiry clears it, so a
+     * marker can never wedge the app.
+     */
+    private fun markZombieOutstanding(gen: Int) {
+        val marker = ZombieMarker(gen)
+        synchronized(zombieLock) {
+            if (zombieMarker?.generation == gen) return
+            if (lateResolvedGeneration == gen) return
+            zombieMarker = marker
+        }
+        Log.d(LOG_TAG, "zombie marker set gen=$gen")
+        requestScope.launch {
+            delay(ZOMBIE_MARKER_EXPIRY_MS)
+            clearZombieMarker(gen, ZombieClearReason.EXPIRED)
+        }
+    }
+
+    /**
+     * v1.0.11: clear [gen]'s zombie marker, if it is the one
+     * outstanding, completing its signal with [reason] so a gated
+     * sign wakes. Called from the interrupted request's own late-
+     * resolution tail (LATE_RESULT), from the marker's expiry timer
+     * (EXPIRED), and from the gate itself when its local wait bound
+     * fires first (EXPIRED). Any outcome of the late request —
+     * success, failure, error, cancellation delivery — clears: what
+     * frees the wallet is the zombie session closing, not the result.
+     */
+    private fun clearZombieMarker(gen: Int, reason: ZombieClearReason) {
+        val marker = synchronized(zombieLock) {
+            val current = zombieMarker
+            if (current == null || current.generation != gen) null
+            else {
+                zombieMarker = null
+                current
+            }
+        } ?: return
+        if (reason == ZombieClearReason.EXPIRED && !marker.gateConsumed) {
+            Log.d(LOG_TAG, "zombie marker expired gen=$gen")
+        }
+        marker.signal.complete(reason)
+    }
+
+    /**
+     * v1.0.11: the sign-path gate. With no marker outstanding this
+     * returns immediately — marker absent → zero wait, so an ordinary
+     * sign is never delayed. Otherwise the FIRST sign after the
+     * interruption consumes the gate and awaits the marker's
+     * clearance, bounded by [ZOMBIE_GATE_WAIT_MS] (the ~35 s
+     * association budget, comfortably inside the 120 s request
+     * backstop that wraps this call). On late-result clearance it
+     * proceeds at once; on expiry it proceeds anyway — today's
+     * behaviour is the floor, never worse. The gate issues no
+     * transact of its own and touches no state: the caller proceeds
+     * to its single transact exactly as before, so no sign can ever
+     * be double-submitted by waiting.
+     */
+    private suspend fun awaitZombieClearGate() {
+        val marker = synchronized(zombieLock) {
+            val current = zombieMarker
+            if (current == null || current.gateConsumed) null
+            else {
+                current.gateConsumed = true
+                current
+            }
+        } ?: return
+        val waitStartMs = System.currentTimeMillis()
+        Log.d(LOG_TAG, "zombie gate wait-start zombieGen=${marker.generation}")
+        val reason = withTimeoutOrNull(ZOMBIE_GATE_WAIT_MS) { marker.signal.await() }
+        val waitedMs = System.currentTimeMillis() - waitStartMs
+        if (reason == ZombieClearReason.LATE_RESULT) {
+            Log.d(
+                LOG_TAG,
+                "zombie gate cleared-by-late-result zombieGen=${marker.generation} waitedMs=$waitedMs"
+            )
+        } else {
+            Log.d(
+                LOG_TAG,
+                "zombie gate wait-expired zombieGen=${marker.generation} waitedMs=$waitedMs"
+            )
+            // The local bound fired before the marker's own expiry
+            // timer (or raced it): make sure the marker is gone.
+            if (reason == null) clearZombieMarker(marker.generation, ZombieClearReason.EXPIRED)
+        }
+    }
 
     /** Get/set the MWA auth token so it can be persisted across restarts. */
     var persistedAuthToken: String?
@@ -661,6 +827,13 @@ class WalletManager {
                 // session's adapter exactly as it is.
                 lastRequestInterrupted = true
                 if (kind != RequestKind.SIGN) resetWalletAdapter()
+                // v1.0.11: this claim leaves a zombie sheet in the
+                // wallet — record its marker so the next SIGN
+                // transact waits for the zombie to clear instead of
+                // firing its association intent into the swallow
+                // (class header). Idempotent with the wrapper tail's
+                // own marking below.
+                markZombieOutstanding(gen)
                 // v1.0.9 claim settlement: wake the awaiting caller
                 // NOW (class header). The wrapper races its request
                 // against this signal; woken, it finds the claim taken
@@ -698,7 +871,35 @@ class WalletManager {
         block: suspend (gen: Int) -> Result<T>
     ): Result<T> {
         val gen = generationCounter.incrementAndGet()
-        val deferred: Deferred<Result<T>> = requestScope.async { block(gen) }
+        val deferred: Deferred<Result<T>> = requestScope.async {
+            try {
+                // v1.0.11 zombie-clear gate (class header): a SIGN
+                // request awaits any outstanding zombie's clearance
+                // BEFORE its transact starts — inside the wrapper, so
+                // the wait sits inside the 120 s backstop below, and
+                // exactly one transact is ever issued per request,
+                // after the wait. Connect requests are never gated
+                // (their refire loop is their own cure).
+                if (kind == RequestKind.SIGN) awaitZombieClearGate()
+                block(gen)
+            } finally {
+                // v1.0.11 zombie-clear hook: this finally is the
+                // generation-suppressed tail of THIS generation — it
+                // runs after block's own post-transact processing
+                // (failIfCurrent for connect, the restore paths for
+                // sign, or a throw) at the moment the parked clientlib
+                // call actually returns. That suspension is
+                // non-cooperative (REPORT_V107), so for a claim-
+                // settled generation this moment IS the late
+                // resolution's arrival: the zombie's result has been
+                // delivered / its session has closed in the wallet.
+                // Any outcome clears. For a generation that was never
+                // claim-settled the marker is absent (or names another
+                // generation) and this is a no-op.
+                if (resolvedGeneration == gen) lateResolvedGeneration = gen
+                clearZombieMarker(gen, ZombieClearReason.LATE_RESULT)
+            }
+        }
         pendingRequest = deferred
         pendingKind = kind
         pendingGeneration = gen
@@ -723,7 +924,12 @@ class WalletManager {
                 null
             } else {
                 deferred.cancel()
-                if (claimResolution(gen)) onInterrupted()
+                if (claimResolution(gen)) {
+                    // v1.0.11: an interrupted resolution leaves a
+                    // zombie sheet in the wallet, this path included.
+                    markZombieOutstanding(gen)
+                    onInterrupted()
+                }
                 throw e
             }
         } finally {
@@ -744,6 +950,13 @@ class WalletManager {
         // (v1.0.8): then only the (failure) result is returned,
         // unwritten.
         deferred.cancel()
+        // v1.0.11: record the zombie this interruption leaves in the
+        // wallet (class header). When the reconciler claimed first,
+        // its site already recorded the same generation's marker and
+        // this call is an idempotent no-op; when this tail is the
+        // resolution (timeout backstop / cancelPendingRequest), this
+        // is the recording site.
+        markZombieOutstanding(gen)
         // v1.0.9: an interrupted request (timeout backstop, or a
         // reconciliation whose claim the reconciler already took)
         // leaves a fresh adapter behind (class header). v1.0.10:
@@ -819,6 +1032,23 @@ class WalletManager {
         private const val INTERRUPTED_ATTEMPT_TIMEOUT_MS = 35_000L
         private const val INTERRUPTED_SLOW_OUTCOME_MS = 25_000L
         private const val INTERRUPTED_REFIRE_PAUSE_MS = 500L
+
+        /**
+         * v1.0.11 zombie-clear gate bounds (class header). The gate
+         * wait is the association budget — the same ~35 s a swallowed
+         * connect attempt consumes (see INTERRUPTED_ATTEMPT_TIMEOUT_MS)
+         * — so a wallet that frees on zombie-result delivery (seconds,
+         * in the observed choreography) wakes the gate almost at once,
+         * while a zombie that never clears costs one slot and the sign
+         * then proceeds exactly as pre-v1.0.11. The wait runs inside
+         * the wrapper, so 35 s sits comfortably inside the 120 s
+         * backstop and still leaves the transact its full budget in
+         * practice. The marker's own expiry is the same bound,
+         * measured from the interruption: a marker can never outlive
+         * one association budget, gated on or not.
+         */
+        private const val ZOMBIE_GATE_WAIT_MS = 35_000L
+        private const val ZOMBIE_MARKER_EXPIRY_MS = 35_000L
         private const val LOG_TAG = "VoidrunnerWallet"
     }
 }
