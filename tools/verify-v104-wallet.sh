@@ -68,6 +68,19 @@
 # VoidrunnerWallet) and settlement — as logcat-vr12.txt with the
 # cell's artefacts. No logcat clear happens between the resolution
 # and the retry leg anymore.
+# Driver r13 (v1.0.9 verdict, REPORT_V109): the retry approval helper
+# (tap_connect_and_complete) now approves EVERY sheet a connect
+# produces, not just the first — the v1.0.9 post-interruption refire
+# loop can surface several sheets in one leg (a swallowed attempt's
+# zombie sheet, then the refired attempt's own sheet on its fresh
+# association; HAUNT r6 choreography). One tap on the recovery
+# control, then an approval loop: bounded at 4 approvals, each waited
+# on inside a 165 s overall budget that covers the full loop
+# (3 attempts x 35 s + refire pauses + approval/auth time), with a
+# <tag>-tcc.txt summary (approvals / elapsed / outcome) per call.
+# The lifecycle suite order also changes: VR-11 runs FIRST, so the
+# 120-min job cap cannot eat it after the long VR-12 legs
+# (REPORT_V108 lost the API-35 VR-11 rep exactly that way).
 #
 # Any AndroidRuntime FATAL (either package) or any IllegalStateException
 # in a captured logcat window is counted and fails the whole verdict.
@@ -564,39 +577,83 @@ vr_state() { # echoes the wallet-screen state keyword from a fresh dump: $1 = du
 }
 
 tap_connect_and_complete() { # $1 = evidence tag; from the wallet screen in a
-  # disconnected/Error state: tap the connect control and accept EITHER
-  # completion path — an approval sheet (fresh authorize) or a silent
-  # reauthorize (a live cached authToken completes the transact with no
-  # sheet at all). The r9 sheet-only probes timed out on the silent path
-  # (VR-9 setup, VR-13 reconnect). Files hier-<tag>-sheet.xml when a
-  # sheet appeared and hier-<tag>-after.xml with the final state dump.
-  local tag="$1" elapsed=0
+  # disconnected/Error state: tap the connect control ONCE, then work the
+  # completion like a real user (r13, HAUNT r6 pattern): approve EVERY
+  # approval sheet the connect produces — the v1.0.9 post-interruption
+  # refire loop can surface several sheets in one leg (a swallowed
+  # attempt's zombie sheet, then the refired attempt's own sheet) —
+  # bounded at 4 approvals, each waited on inside the overall budget.
+  # Accepts EITHER completion path — approval sheet(s) (fresh authorize)
+  # or a silent reauthorize (a live cached authToken completes the
+  # transact with no sheet at all; the r9 sheet-only probes timed out on
+  # the silent path — VR-9 setup, VR-13 reconnect). The 165 s budget
+  # covers the full refire loop: 3 attempts x 35 s slots + refire pauses
+  # + approval/auth time. An Error state in the app's own window at
+  # >= 20 s is final (the loop never shows Error mid-flight — it ends
+  # there), so the poll exits early instead of burning the budget.
+  # Files hier-<tag>-sheet.xml (first sheet), hier-<tag>-sheet<N>.xml
+  # (later sheets), hier-<tag>-after.xml (final state dump) and
+  # <tag>-tcc.txt (approvals / elapsed / outcome summary).
+  local tag="$1" elapsed=0 approvals=0 outcome="timeout"
   dump_ui "$TMPD/tcc-pre.xml" || return 1
   tap_text "$TMPD/tcc-pre.xml" "TRY AGAIN" || tap_text "$TMPD/tcc-pre.xml" "CONNECT WALLET" || return 1
-  while [ "$elapsed" -lt 45 ]; do
+  while [ "$elapsed" -lt 165 ]; do
     if dump_ui "$TMPD/tcc-poll.xml"; then
-      if sheet_present "$TMPD/tcc-poll.xml"; then
-        cp "$TMPD/tcc-poll.xml" "$OUT/hier-$tag-sheet.xml"
-        snap "shot-$tag-sheet.png"
-        log "$tag: approval sheet appeared; approving"
-        tap_exact "$OUT/hier-$tag-sheet.xml" "Connect" || tap_text "$OUT/hier-$tag-sheet.xml" "Connect" || return 1
-        sleep 4
-        satisfy_auth_prompt || true
-        break
+      if [ "$(fg_pkg)" = "$PKG" ]; then
+        local st_poll; st_poll="$(state_of "$TMPD/tcc-poll.xml")"
+        if [ "$st_poll" = "connected" ]; then
+          if [ "$approvals" -eq 0 ]; then
+            log "$tag: connect completed by silent reauthorize (no sheet)"
+            outcome="connected-silent"
+          else
+            outcome="connected"
+          fi
+          break
+        fi
+        if [ "$st_poll" = "error" ] && [ "$elapsed" -ge 20 ]; then
+          log "$tag: app settled in Error at ${elapsed}s (loop ended without Connected)"
+          outcome="error"
+          break
+        fi
       fi
-      if [ "$(fg_pkg)" = "$MOCK" ] && grep -q "AUTHENTICATE" "$TMPD/tcc-poll.xml" && ! sheet_present "$TMPD/tcc-poll.xml"; then
+      if sheet_present "$TMPD/tcc-poll.xml"; then
+        if [ "$approvals" -lt 4 ]; then
+          approvals=$((approvals + 1))
+          if [ "$approvals" -eq 1 ]; then
+            cp "$TMPD/tcc-poll.xml" "$OUT/hier-$tag-sheet.xml"
+          else
+            cp "$TMPD/tcc-poll.xml" "$OUT/hier-$tag-sheet$approvals.xml"
+          fi
+          snap "shot-$tag-sheet$approvals.png"
+          log "$tag: approval sheet #$approvals appeared at ${elapsed}s; approving"
+          if tap_exact "$TMPD/tcc-poll.xml" "Connect" || tap_text "$TMPD/tcc-poll.xml" "Connect" || tap_exact "$TMPD/tcc-poll.xml" "Approve" || tap_text "$TMPD/tcc-poll.xml" "Approve"; then
+            sleep 4
+            satisfy_auth_prompt || true
+          else
+            log "$tag: sheet #$approvals present but no approve control matched; continuing to poll"
+            approvals=$((approvals - 1))
+          fi
+        else
+          log "$tag: sheet present but the approval cap (4) is reached; not approving"
+          sleep 3
+        fi
+      elif [ "$(fg_pkg)" = "$MOCK" ] && grep -q "AUTHENTICATE" "$TMPD/tcc-poll.xml"; then
         log "$tag: wallet sits at its Authenticate gate - authenticating"
         tap_exact "$TMPD/tcc-poll.xml" "AUTHENTICATE" || true
         satisfy_auth_prompt || true
         date +%s > "$AUTH_EPOCH_FILE" || true
       fi
-      if [ "$(fg_pkg)" = "$PKG" ] && [ "$(state_of "$TMPD/tcc-poll.xml")" = "connected" ]; then
-        log "$tag: connect completed by silent reauthorize (no sheet)"
-        break
-      fi
     fi
     sleep 3; elapsed=$((elapsed + 3))
   done
+  if [ "$outcome" = "timeout" ] && [ "$(vr_state "$TMPD/tcc-final.xml")" = "connected" ]; then outcome="connected"; fi
+  {
+    echo "tcc_tag=$tag"
+    echo "tcc_approvals=$approvals"
+    echo "tcc_elapsed_s=$elapsed"
+    echo "tcc_outcome=$outcome"
+  } > "$OUT/$tag-tcc.txt"
+  log "$tag: tap_connect_and_complete done: approvals=$approvals elapsed=${elapsed}s outcome=$outcome"
   wait_for "CONNECTED" 30 "$OUT/hier-$tag-after.xml" && grep -q "$EXPECTED_PUBKEY" "$OUT/hier-$tag-after.xml"
 }
 
@@ -1199,6 +1256,10 @@ cell_vr12() {
         echo "vr12_post_resolution_connect=FAIL (no recovery connect after resolution to '$res_state' at ${res_latency}s)" >> "$OUT/vr12-notes.txt"
         vr12b="FAIL(TRY AGAIN from the interrupted Error did not complete a connect in-process)"
       fi
+      # r13: fold the helper's per-leg summary (approvals / elapsed /
+      # outcome — elapsed is the retry leg's time-to-Connected when the
+      # outcome is connected) into the cell's notes for the report.
+      if [ -f "$OUT/vr12-retry-tcc.txt" ]; then cat "$OUT/vr12-retry-tcc.txt" >> "$OUT/vr12-notes.txt"; fi
       if [ "${vr12a#PASS}" != "$vr12a" ] && [ "${vr12b#PASS}" != "$vr12b" ]; then
         vr12="PASS(abandoned mid-approval resolved to the interrupted Error in ${res_latency}s; in-process TRY AGAIN recovery connect succeeded)"
       else
@@ -1382,7 +1443,7 @@ cell_vr11() {
 case "$SUITE" in
   core)      cell_vr1; cell_vr3; cell_vr9; cell_vr6; cell_vr2 ;;
   errors)    cell_vr7; cell_vr8; cell_vr13 ;;
-  lifecycle) cell_vr12; cell_vr12sign; cell_vr11 ;;
+  lifecycle) cell_vr11; cell_vr12; cell_vr12sign ;;
   *) log "unknown SUITE=$SUITE"; exit 2 ;;
 esac
 
