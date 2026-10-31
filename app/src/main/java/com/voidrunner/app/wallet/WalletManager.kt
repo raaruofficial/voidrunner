@@ -136,6 +136,31 @@ sealed interface WalletUiState {
  *   the claim being already taken, it returns the unwritten failure
  *   result and never re-invokes onInterrupted — settlement is exactly
  *   once, by the same claim that guards the state write.
+ *
+ * v1.0.10 KFC-008 SIGN-BRANCH CORRECTION (REPORT_V109, §2.2 verdict on
+ * v1.0.9 — VR-12(a) PASS ×3, VR-12(b) PASS ×3 with the modelled
+ * slow-refire choreography, scoping probes clean; but VR-12(c) FAIL
+ * ×3 bars the build): the sign branch's resolution half restored
+ * Connected+pubkey in 3–6 s in every rep, yet the FOLLOW-UP sign then
+ * created exactly one fresh association that never established — the
+ * interruption resolution's adapter reset (the v1.0.9 hygiene layer
+ * above) discards the adapter instance the established session lives
+ * on, so the follow-up sign is forced onto a fresh association, which
+ * the wallet swallows while it still holds the zombie sign session;
+ * the sign path carries no refire loop (connect-only, by design —
+ * sign and sign-and-send are not idempotent, so a refire could
+ * double-submit). On v1.0.8 — no resolution-time reset — the
+ * follow-up sign reused the established session and VR-12(c) passed
+ * ×3 (REPORT_V108; re-proven on v1.0.8 in REPORT_V109's control run,
+ * VR-12S PASS). The cure is kind-scoped: interruption resolutions for
+ * SIGN-kind requests no longer discard/recreate the adapter — the
+ * session and its adapter stay exactly as established, so a follow-up
+ * sign reuses the established session. CONNECT resolutions keep the
+ * reset, and the connect path's own adapter choreography (the entry
+ * discard and the per-attempt resets inside [performConnect]) is
+ * byte-preserved: VR-12(b) passed ×3 with exactly that choreography,
+ * and those resets fire only inside performConnect, which the sign
+ * paths never enter.
  */
 class WalletManager {
 
@@ -162,11 +187,13 @@ class WalletManager {
     /**
      * v1.0.9 (HAUNT v0.1.17): set when a wallet request has been
      * resolved as interrupted (foreground reconciliation or the
-     * timeout backstop). The resolution itself already discarded the
-     * adapter; a connect that follows an interruption discards once
-     * more before transacting (see the class header), so the retry
-     * never inherits any scenario state accumulated since the
-     * interruption either.
+     * timeout backstop). A CONNECT resolution itself already discarded
+     * the adapter; a SIGN resolution deliberately did not (v1.0.10 —
+     * the follow-up sign reuses the established session; see the class
+     * header). Either way, a connect that follows an interruption
+     * discards once more before transacting (see the class header),
+     * so the retry never inherits any scenario state accumulated
+     * since the interruption either.
      */
     @Volatile
     private var lastRequestInterrupted: Boolean = false
@@ -625,9 +652,15 @@ class WalletManager {
                 // v1.0.9: the resolution that writes the state also
                 // discards the adapter, so the zombie association the
                 // cancelled request left behind dies here — seconds
-                // before the user can even tap the retry (class header).
+                // before the user can even tap the retry (class
+                // header). v1.0.10: SIGN resolutions are the exception
+                // — discarding the adapter strands the follow-up sign
+                // on a fresh association the wallet swallows while it
+                // still holds the zombie sign session (REPORT_V109
+                // §VR-12(c)); a SIGN resolution keeps the established
+                // session's adapter exactly as it is.
                 lastRequestInterrupted = true
-                resetWalletAdapter()
+                if (kind != RequestKind.SIGN) resetWalletAdapter()
                 // v1.0.9 claim settlement: wake the awaiting caller
                 // NOW (class header). The wrapper races its request
                 // against this signal; woken, it finds the claim taken
@@ -713,9 +746,13 @@ class WalletManager {
         deferred.cancel()
         // v1.0.9: an interrupted request (timeout backstop, or a
         // reconciliation whose claim the reconciler already took)
-        // always leaves a fresh adapter behind (class header).
+        // leaves a fresh adapter behind (class header). v1.0.10:
+        // SIGN-kind interruptions are the exception, exactly as at
+        // the reconciler's resolution site above — the established
+        // session and its adapter are preserved so the follow-up sign
+        // reuses the session (REPORT_V109 §VR-12(c)).
         lastRequestInterrupted = true
-        resetWalletAdapter()
+        if (kind != RequestKind.SIGN) resetWalletAdapter()
         return if (claimResolution(gen)) onInterrupted()
         else Result.failure(IllegalStateException(INTERRUPTED_MESSAGE))
     }
