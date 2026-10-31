@@ -54,6 +54,20 @@
 # vr12sign (sign branch: abandoned sign must resolve directly to
 # Connected+pubkey, then a further sign must succeed) — recorded in
 # vr12-notes.txt / vr12s-notes.txt and echoed into the verdict file.
+# Driver r12 (v1.0.9 verdict prep): VR-12 logcat capture ordering FIX.
+# REPORT_V108 §VR-12(b) documented that the retry leg's logcat window
+# did not survive: cell_vr12 called capture_window "vr12" (dump +
+# CLEAR) immediately after the resolution polling, BEFORE the retry
+# leg ran, and the next cell's opening logcat -c wiped what the retry
+# left in the buffer — so the retry's association behaviour was not
+# determinable from VR's artefacts. The cell now captures exactly
+# ONCE, after the retry leg: the clear at cell start opens the window
+# and the single end-of-cell capture exports the FULL contiguous
+# vr12 window — initial connect, abandonment, resolution, retry
+# attempts (incl. the app's per-attempt Log.d markers, tag
+# VoidrunnerWallet) and settlement — as logcat-vr12.txt with the
+# cell's artefacts. No logcat clear happens between the resolution
+# and the retry leg anymore.
 #
 # Any AndroidRuntime FATAL (either package) or any IllegalStateException
 # in a captured logcat window is counted and fails the whole verdict.
@@ -1149,13 +1163,17 @@ cell_vr12() {
       printf '%s' "$samples"
       if [ "$st" != "working" ] && [ "$elapsed" -le 20 ]; then echo "vr12_in_window_resolution=yes"; else echo "vr12_in_window_resolution=no"; fi
       echo "vr12_bar_s=20 (grace 5 s + 15 s; REPORT_V108 cell definition)"
-      echo "vr12_expectation=v1.0.8 KFC-008: after the 5 s grace the reconciler claims the pending generation and writes UI state DIRECTLY from session truth -> interrupted Error (TRY AGAIN); no dependence on waking the parked clientlib awaiter"
+      echo "vr12_expectation=v1.0.9 KFC-008: after the 5 s grace the reconciler — scoped to the generation pending at backgrounding — claims it and writes UI state DIRECTLY from session truth -> interrupted Error (TRY AGAIN); the retry (TRY AGAIN) runs the post-interruption refire loop (up to 3 attempts x 35 s on a reset adapter; slow >25 s outcomes refire) with per-attempt Log.d markers (tag VoidrunnerWallet) preserved in logcat-vr12.txt"
     } > "$OUT/vr12-notes.txt"
     if [ "$st" = "connected" ]; then result="completed"
     elif [ "$st" = "error" ] || [ "$st" = "disconnected" ]; then result="failed-closed"
     elif [ "$st" = "working" ]; then result="hung"; fi
   fi
-  capture_window "vr12"
+  # r12: NO capture_window here. The pre-r12 driver dumped + cleared
+  # the vr12 window at exactly this point — before the retry leg ran —
+  # and the next cell's opening clear destroyed the retry's evidence
+  # (REPORT_V108 §VR-12(b)). The cell's single capture now happens
+  # after the case block, so logcat-vr12.txt spans the whole cell.
   case "$result" in
     completed)
       vr12a="PASS(approval completed through the result path after foregrounding — the wallet had not abandoned, so no direct resolution was needed)"
@@ -1192,6 +1210,10 @@ cell_vr12() {
       vr12b="NOT-RUN(no resolution to retry from)"
       vr12="FAIL(background/foreground left the connect flow in state '$result')" ;;
   esac
+  # r12: the cell's ONE logcat capture — after the retry leg, so
+  # logcat-vr12.txt holds the full contiguous vr12 window (initial
+  # connect, abandonment, resolution, retry attempts, settlement).
+  capture_window "vr12"
   if [ -f "$OUT/vr12-notes.txt" ]; then
     { echo "vr12a=$vr12a"; echo "vr12b=$vr12b"; } >> "$OUT/vr12-notes.txt"
   fi
@@ -1253,7 +1275,7 @@ cell_vr12sign() {
     echo "vr12s_resolution_latency_s=$elapsed"
     printf '%s' "$samples"
     echo "vr12s_bar_s=20 (grace 5 s + 15 s; REPORT_V108 cell definition)"
-    echo "vr12s_expectation=v1.0.8 KFC-008 sign branch: reconciler restores Connected from sessionPublicKeyBase58 directly; no error, no disconnect"
+    echo "vr12s_expectation=v1.0.9 KFC-008 sign branch: reconciler — scoped to the generation pending at backgrounding — restores Connected from sessionPublicKeyBase58 directly; no error, no disconnect"
   } > "$OUT/vr12s-notes.txt"
   log "vr12s: post-return resolution state=$st after ${elapsed}s (fg=$(fg_pkg))"
   capture_window "vr12s"

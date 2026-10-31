@@ -54,6 +54,16 @@ class MainActivity : ComponentActivity() {
         (application as VoidrunnerApp).walletManager.onReturnedToForeground()
     }
 
+    override fun onStop() {
+        // v1.0.9: snapshot which wallet request (if any) is pending as
+        // the app backgrounds — the foreground reconciler may resolve
+        // ONLY that generation (it is the one the wallet may have
+        // abandoned). A request started later, in the foreground (the
+        // user's retry), is never a reconciliation candidate.
+        (application as VoidrunnerApp).walletManager.onAppBackgrounded()
+        super.onStop()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         activityResultSender = ActivityResultSender(this)
