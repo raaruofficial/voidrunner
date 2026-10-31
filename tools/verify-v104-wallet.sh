@@ -1502,10 +1502,10 @@ cell_vr12sign() {
     auth_fresh_enough
     dump_ui "$TMPD/vr12s-conn2.xml" || true
     if tap_text "$TMPD/vr12s-conn2.xml" "SIGN TEST MESSAGE"; then
-      if approve_followup_sign "vr12s"; then
-        vr12sign="PASS(abandoned sign resolved directly to Connected+pubkey in ${elapsed}s — within the grace+15 s bar, no error/disconnect; the follow-up sign then succeeded via sequential zombie-first approvals behind the zombie-clear gate — gate markers in logcat-vr12s-followup.txt, approvals in vr12s-fup.txt)"
+      if probe_redefined_followup "vr12s"; then
+        vr12sign="PROBE-PASS(redefined cell: resolution to Connected in ${elapsed}s; follow-up #1's intent surfaced the zombie, zombie approved, follow-up #1 settled on its own, and a SECOND follow-up sign issued via the app surface then succeeded — see vr12s-probe.txt + logcat-vr12s-followup.txt)"
       else
-        vr12sign="FAIL(resolved to Connected in ${elapsed}s but the follow-up sign did not complete — see vr12s-fup.txt + logcat-vr12s-followup.txt)"
+        vr12sign="PROBE-FAIL(redefined cell: resolution to Connected in ${elapsed}s but the redefined-cell sequence did not complete — see vr12s-probe.txt + logcat-vr12s-followup.txt)"
       fi
     else
       vr12sign="FAIL(resolved to Connected in ${elapsed}s but no sign control for the follow-up sign)"
@@ -1523,6 +1523,77 @@ cell_vr12sign() {
   fi
   echo "vr12sign=$vr12sign" >> "$OUT/vr12s-notes.txt"
   log "vr12sign: $vr12sign"
+}
+
+
+# --- PROBE (ROOK Leg B item 5, redefined-cell probe; NOT a verdict cell) ---
+# Redefined cell floated in REPORT_V111's Consequence paragraph: after
+# resolution, issue follow-up sign #1 (its intent re-presents the zombie),
+# approve the ZOMBIE only, then OBSERVE whether follow-up #1 settles on its
+# own (bounded 180 s, covering the 120 s backstop) WITHOUT approving any
+# further sheet and WITHOUT foregrounding the wallet again; then issue the
+# sign a SECOND time via the app's own surface and approve its sheet.
+probe_redefined_followup() { # $1 = evidence tag
+  local tag="$1" elapsed=0 approvals=0 outcome="timeout" st_p="" sheet2="no" settled_at="" settle_state=""
+  # Phase 1: approve the zombie sheet the follow-up intent surfaces.
+  while [ "$elapsed" -lt 60 ]; do
+    if dump_ui "$TMPD/probe-poll.xml"; then
+      if [ "$(fg_pkg)" = "$PKG" ] && [ "$approvals" -eq 0 ]; then foreground_wallet_task; fi
+      if sheet_present "$TMPD/probe-poll.xml" && [ "$approvals" -eq 0 ]; then
+        approvals=1
+        cp "$TMPD/probe-poll.xml" "$OUT/hier-$tag-probe-zombie-sheet.xml"
+        log "$tag probe: zombie sheet at ${elapsed}s; approving zombie ONLY"
+        if tap_exact "$TMPD/probe-poll.xml" "Approve" || tap_text "$TMPD/probe-poll.xml" "Approve"; then
+          echo "probe_zombie_approved_at_s=$elapsed" >> "$OUT/$tag-probe.txt"
+          sleep 4; satisfy_auth_prompt || true
+        else
+          approvals=0; log "$tag probe: zombie sheet present but approve tap failed"
+        fi
+      elif [ "$(fg_pkg)" = "$MOCK" ] && grep -q "AUTHENTICATE" "$TMPD/probe-poll.xml" && [ "$approvals" -eq 0 ]; then
+        tap_exact "$TMPD/probe-poll.xml" "AUTHENTICATE" || true; satisfy_auth_prompt || true
+        date +%s > "$AUTH_EPOCH_FILE" || true
+      fi
+    fi
+    [ "$approvals" -ge 1 ] && break
+    sleep 3; elapsed=$((elapsed + 3))
+  done
+  echo "probe_zombie_approvals=$approvals" >> "$OUT/$tag-probe.txt"
+  # Phase 2: observe-only settle wait, 180 s from cell start (elapsed continues).
+  while [ "$elapsed" -lt 180 ]; do
+    sleep 3; elapsed=$((elapsed + 3))
+    st_p="$(vr_state "$TMPD/probe-poll2.xml")"
+    echo "probe_sample_${elapsed}s=$st_p" >> "$OUT/$tag-probe.txt"
+    if dump_ui "$TMPD/probe-sheetchk.xml" && sheet_present "$TMPD/probe-sheetchk.xml"; then sheet2="yes"; fi
+    if [ "$st_p" != "working" ] && [ "$st_p" != "nodump" ]; then settled_at=$elapsed; settle_state="$st_p"; break; fi
+  done
+  {
+    echo "probe_sheet2_seen_during_observe=$sheet2"
+    echo "probe_settled_at_s=${settled_at:-none}"
+    echo "probe_settle_state=${settle_state:-still-working-at-180s}"
+  } >> "$OUT/$tag-probe.txt"
+  # Phase 3: re-issue the same sign via the app's own surface.
+  if [ "$settle_state" = "connected" ]; then
+    auth_fresh_enough
+    dump_ui "$TMPD/probe-conn3.xml" || true
+    if tap_text "$TMPD/probe-conn3.xml" "SIGN TEST MESSAGE"; then
+      echo "probe_reissue_tap=ok" >> "$OUT/$tag-probe.txt"
+      if wait_sheet "$OUT/hier-$tag-probe-sign2-sheet.xml" 45; then
+        tap_exact "$OUT/hier-$tag-probe-sign2-sheet.xml" "Approve" || true
+        sleep 3; satisfy_auth_prompt || true
+        if [ "$(vr_state "$TMPD/probe-after3.xml")" = "connected" ]; then outcome="connected"; fi
+        echo "probe_reissue_sheet=presented outcome_state_checked" >> "$OUT/$tag-probe.txt"
+      else
+        echo "probe_reissue_sheet=none-in-45s" >> "$OUT/$tag-probe.txt"
+      fi
+    else
+      echo "probe_reissue_tap=no-sign-control" >> "$OUT/$tag-probe.txt"
+    fi
+  else
+    echo "probe_reissue=skipped (follow-up never settled to Connected)" >> "$OUT/$tag-probe.txt"
+  fi
+  echo "probe_outcome=$outcome" >> "$OUT/$tag-probe.txt"
+  log "$tag probe: done approvals=$approvals settled_at=${settled_at:-none} state=${settle_state:-working} outcome=$outcome"
+  [ "$outcome" = "connected" ]
 }
 
 # --- VR-11: entry points / destination registry ------------------------------------------
