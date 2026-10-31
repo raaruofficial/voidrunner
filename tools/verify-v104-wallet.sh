@@ -82,6 +82,24 @@
 # 120-min job cap cannot eat it after the long VR-12 legs
 # (REPORT_V108 lost the API-35 VR-11 rep exactly that way).
 #
+# Driver r15 (v1.0.10 cure, REPORT_V109): two lifecycle fixes.
+# (r14 was the v1.0.9 verdict-lane retarget — workflow/action only,
+# no driver change.) (1) The lifecycle order is REVERSED from r13:
+# the VR-12 cells (connect + sign) now run BEFORE VR-11. r13 moved
+# VR-11 first to protect it from the 120-min job cap (the V108
+# failure mode); REPORT_V109 proved the opposite failure mode is
+# the live one — the API-35 lifecycle job died INSIDE VR-11 in both
+# dedicated runs and never reached VR-12 at all, so the KFC-008
+# cells now run first, while the rig is fresh. (2) VR-11's
+# game-destination probe is BOUNDED: the game hierarchy dump runs
+# under a 120 s total budget (dump_ui_bounded); if the rig cannot
+# produce the hierarchy inside the budget, VR-11 is recorded
+# NOT-RUN (rig) and the suite CONTINUES to its verdict epilogue
+# instead of burning the whole 120-min job in dump_ui's retries
+# and the unbounded tail behind the failed dump (REPORT_V109
+# addendum: dump_ui failed after 8 attempts, hier-vr11-game.xml
+# never produced, both API-35 jobs uploaded no verdict at all).
+#
 # Any AndroidRuntime FATAL (either package) or any IllegalStateException
 # in a captured logcat window is counted and fails the whole verdict.
 set -u
@@ -140,6 +158,29 @@ dump_ui() { # $1 = destination file
     sleep 3
   done
   log "dump_ui: FAILED after 8 attempts -> $dst"
+  return 1
+}
+
+dump_ui_bounded() { # $1 = destination file, $2 = total budget secs
+  # r15: dump_ui with a hard wall-clock budget. dump_ui's 8 attempts
+  # at up to 40 s each can burn ~6 min per call on a rig whose
+  # uiautomator is wedged; a caller that must not stall the suite
+  # (VR-11's game-destination probe, REPORT_V109 addendum) uses this
+  # instead and treats budget exhaustion as a rig NOT-RUN.
+  local dst="$1" budget="$2" start attempt=0
+  start=$SECONDS
+  while [ $((SECONDS - start)) -lt "$budget" ]; do
+    attempt=$((attempt + 1))
+    adb shell rm -f /sdcard/window_dump.xml >/dev/null 2>&1 || true
+    timeout 25 adb shell uiautomator dump /sdcard/window_dump.xml >/dev/null 2>&1 || true
+    adb exec-out cat /sdcard/window_dump.xml > "$dst.tmp" 2>/dev/null || true
+    if grep -q "</hierarchy>" "$dst.tmp" 2>/dev/null && dump_is_substantive "$dst.tmp"; then
+      mv "$dst.tmp" "$dst"
+      return 0
+    fi
+    sleep 2
+  done
+  log "dump_ui_bounded: budget ${budget}s exhausted after $attempt attempts -> $dst"
   return 1
 }
 
@@ -1399,7 +1440,17 @@ cell_vr11() {
   tap_text "$TMPD/vr11-h2.xml" "PLAY" || tap_frac 0.5 0.45
   sleep 8
   dismiss_host_anr
-  dump_ui "$OUT/hier-vr11-game.xml" || true
+  # r15: the game-destination probe is bounded (REPORT_V109
+  # addendum). On the API-35 rig uiautomator could not produce this
+  # hierarchy at all; dump_ui's retries plus the unbounded tail
+  # behind the failed dump burned the entire 120-min job before
+  # VR-12 ever ran. If the hierarchy cannot be captured inside the
+  # probe budget, VR-11 is NOT-RUN (rig) and the suite continues.
+  if ! dump_ui_bounded "$OUT/hier-vr11-game.xml" 120; then
+    vr11="NOT-RUN(rig: game-destination probe exceeded its 120 s budget — uiautomator hierarchy unavailable on this AVD; REPORT_V109 API-35 stall shape)"
+    log "vr11: $vr11"
+    return
+  fi
   local nodes; nodes="$(grep -c "<node" "$OUT/hier-vr11-game.xml" 2>/dev/null || echo 0)"
   log "vr11: game hierarchy node count = $nodes (WebView surface only; bridge taps not harness-reachable)"
   adb logcat -d > "$OUT/logcat-vr11-game.txt" 2>&1 || true
@@ -1443,7 +1494,7 @@ cell_vr11() {
 case "$SUITE" in
   core)      cell_vr1; cell_vr3; cell_vr9; cell_vr6; cell_vr2 ;;
   errors)    cell_vr7; cell_vr8; cell_vr13 ;;
-  lifecycle) cell_vr11; cell_vr12; cell_vr12sign ;;
+  lifecycle) cell_vr12; cell_vr12sign; cell_vr11 ;;
   *) log "unknown SUITE=$SUITE"; exit 2 ;;
 esac
 
