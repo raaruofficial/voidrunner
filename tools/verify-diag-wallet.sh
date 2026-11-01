@@ -254,8 +254,8 @@ cell_probe() {
       adb shell dumpsys package "$p" 2>/dev/null | grep -iE "intent|solana-wallet|Activity|Service" | head -30 || true
     done
   } > "$OUT/probe-intent.txt" 2>&1
-  if grep -qiE "fakewallet" "$OUT/probe-intent.txt" && grep -qiE "solana-wallet" "$OUT/probe-intent.txt"; then
-    note "probe_result=fakewallet MAY resolve MWA intent (inspect probe-intent.txt)"
+  if grep -A40 "dumpsys package com.solanamobile" "$OUT/probe-intent.txt" | grep -q "solana-wallet"; then
+    note "probe_result=a simulator package's dumpsys resolver table carries a solana-wallet filter (inspect probe-intent.txt)"
   else
     note "probe_result=NO simulator-backed package resolves the MWA association intent"
   fi
@@ -325,6 +325,7 @@ cell_onboard() {
 }
 
 cell_connect() {
+  adb shell am force-stop "$VR_PKG" >/dev/null 2>&1 || true; sleep 1
   goto_home
   local f="$OUT/hier-connect-entry.xml"
   dump_ui "$f" || return 1
@@ -377,6 +378,7 @@ cell_connect() {
 }
 
 cell_gate() {
+  adb shell am force-stop "$VR_PKG" >/dev/null 2>&1 || true; sleep 1
   goto_home
   local f="$OUT/hier-gate-home.xml"
   dump_ui "$f" || return 1
@@ -395,7 +397,7 @@ cell_gate() {
   dump_ui "$OUT/hier-gate-typed.xml" || true; snap shot-gate-typed.png
   tap_exact "$OUT/hier-gate-typed.xml" "SIGN IN" || tap_text "$OUT/hier-gate-typed.xml" "SIGN IN" || { note "gate_result=NO_SIGNIN_BUTTON"; capture_logcat gate; return 1; }
   note "gate: handle '$GATE_HANDLE' submitted; waiting for proof panel"
-  if ! wait_for "PROVE IT|LINK MY WALLET|Paste the base58|reserved|not registered|couldn" 90 "$OUT/hier-gate-panel.xml"; then
+  if ! wait_for "Link my wallet|Prove it|PROVE IT|LINK MY WALLET|Paste the base58|reserved|not registered|couldn" 90 "$OUT/hier-gate-panel.xml"; then
     note "gate_result=NO_PANEL fg=$(fg_pkg)"
     snap shot-gate-nopanel.png; capture_logcat gate; return 1
   fi
@@ -405,7 +407,7 @@ cell_gate() {
   fi
   adb logcat -c >/dev/null 2>&1 || true
   local t0=$SECONDS
-  tap_text "$f" "PROVE IT" || tap_text "$f" "LINK MY WALLET" || { note "gate_result=NO_BRIDGE_BUTTON"; capture_logcat gate; return 1; }
+  tap_text "$f" "Prove it" || tap_text "$f" "Link my wallet" || tap_text "$f" "PROVE IT" || tap_text "$f" "LINK MY WALLET" || { note "gate_result=NO_BRIDGE_BUTTON"; capture_logcat gate; return 1; }
   note "gate: bridge button tapped at t0; observing 60s (wallet_pkg=${WALLET_PKG:-none})"
   local i fg_seen="" outcome="TIMEOUT_NO_CHANGE"
   for i in $(seq 1 20); do
@@ -417,7 +419,7 @@ cell_gate() {
       if grep -q "Wallet signing didn't complete" "$f"; then outcome="FAILURE_COPY_MB (Wallet signing didn't complete)"; break; fi
       if grep -q "The wallet didn't return a signature" "$f"; then outcome="FAILURE_COPY_NB (wallet didn't return a signature)"; break; fi
       if grep -q "Signing was cancelled" "$f"; then outcome="FAILURE_COPY_AB (cancelled)"; break; fi
-      if ! grep -qE "PROVE IT|LINK MY WALLET|WAITING FOR WALLET" "$f" && grep -qE "PILOT SIGNAL|PLAY|Sector|sector|Wave|wave" "$f"; then
+      if ! grep -qE "Prove it|Link my wallet|PROVE IT|LINK MY WALLET|WAITING FOR WALLET" "$f" && grep -qE "PILOT SIGNAL|PLAY|Sector|sector|Wave|wave" "$f"; then
         outcome="PANEL_CLEARED (possible success — inspect dumps)"; break
       fi
     fi
