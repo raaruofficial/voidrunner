@@ -92,15 +92,15 @@ runs:
       run: |
         set -euo pipefail
         cd "$GITHUB_WORKSPACE"
-        gh release download diag-wallets-2026-11-01 --pattern 'phantom-26.23.1.apkm' --dir /tmp/phantom
-        actual="$(sha256sum /tmp/phantom/phantom-26.23.1.apkm | awk '{print $1}')"
+        gh release download diag-wallets-2026-11-01 --pattern 'phantom-26.23.1.apk' --dir /tmp/phantom
+        actual="$(sha256sum /tmp/phantom/phantom-26.23.1.apk | awk '{print $1}')"
         echo "phantom APKM sha256: $actual"
         if [ "$actual" != "$EXPECTED_APKM_SHA256" ]; then
           echo "::error::Phantom APKM hash mismatch — aborting"
           exit 1
         fi
         mkdir -p "$GITHUB_WORKSPACE/phantom-bundle"
-        unzip -o /tmp/phantom/phantom-26.23.1.apkm -d "$GITHUB_WORKSPACE/phantom-bundle" > /dev/null
+        unzip -o /tmp/phantom/phantom-26.23.1.apk -d "$GITHUB_WORKSPACE/phantom-bundle" > /dev/null
         ls "$GITHUB_WORKSPACE/phantom-bundle" | head -40
         # provenance: signing certificate of the production base APK
         APKSIGNER="$(find "$ANDROID_HOME/build-tools" -name apksigner | sort | tail -1)"
@@ -149,15 +149,12 @@ runs:
         ram-size: 8192
         disable-animations: true
         emulator-options: -no-window -gpu swiftshader_indirect -memory 8192 -no-boot-anim -camera-back none -camera-front none
+        # NOTE: this runner executes the script block LINE BY LINE via
+        # sh -c (run 41351187212: multi-line if-blocks died with
+        # "Syntax error: expecting fi", and exports do not persist
+        # between lines). One standalone command only — the bash driver
+        # derives everything else itself (WALLET_PKG, SV_*_APK paths).
         script: |
-          export WALLET_PKG="com.solana.mwallet"
-          if [ "$WALLET_KIND" = "phantom" ]; then export WALLET_PKG="app.phantom"; fi
-          if [ "$WALLET_KIND" = "seedvault" ]; then
-            export WALLET_PKG="com.solanamobile.fakewallet"
-            export SV_SIM_APK="$(find "$GITHUB_WORKSPACE/sv-src/SeedVaultSimulator" -path '*outputs/apk*' -name '*.apk' | head -1)"
-            export SV_FAKE_APK="$(find "$GITHUB_WORKSPACE/sv-src/fakewallet" -path '*outputs/apk*' -name '*.apk' | head -1)"
-            echo "SV_SIM_APK=$SV_SIM_APK SV_FAKE_APK=$SV_FAKE_APK"
-          fi
           bash tools/verify-diag-wallet.sh
 
     - name: Upload diag evidence

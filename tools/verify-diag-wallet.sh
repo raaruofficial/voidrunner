@@ -29,6 +29,21 @@ VR_PKG="com.voidrunner.app"
 ACT="$VR_PKG/.MainActivity"
 WALLET_KIND="${WALLET_KIND:-mock}"
 WALLET_PKG="${WALLET_PKG:-}"
+# The emulator-runner executes the action's script block line-by-line via
+# sh -c (run 41351187212 died on multi-line if-blocks), so no exports can
+# be handed in from the action — derive wallet identity + SV paths here.
+if [ -z "$WALLET_PKG" ]; then
+  case "$WALLET_KIND" in
+    phantom)   WALLET_PKG="app.phantom" ;;
+    seedvault) WALLET_PKG="com.solanamobile.fakewallet" ;;
+    *)         WALLET_PKG="com.solana.mwallet" ;;
+  esac
+fi
+if [ "$WALLET_KIND" = "seedvault" ]; then
+  SV_SIM_APK="${SV_SIM_APK:-$(find "${GITHUB_WORKSPACE:-$PWD}/sv-src/SeedVaultSimulator" -path '*outputs/apk*' -name '*.apk' 2>/dev/null | head -1)}"
+  SV_FAKE_APK="${SV_FAKE_APK:-$(find "${GITHUB_WORKSPACE:-$PWD}/sv-src/fakewallet" -path '*outputs/apk*' -name '*.apk' 2>/dev/null | head -1)}"
+  export SV_SIM_APK SV_FAKE_APK
+fi
 CELLS="${CELLS:-gate}"
 VR_APK="${VR_APK:-}"
 OUT="${OUT:-fun001-diag-evidence}"
