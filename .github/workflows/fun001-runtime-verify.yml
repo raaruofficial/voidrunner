@@ -63,6 +63,7 @@ on:
           - battery-sweep-api36
           - battery-sweep-api35
           - everything
+          - diag-realwallet
         default: wallet-core-api36
       vr12_observe_s:
         description: VR-12 observation window seconds (30 = cell; 150 = diagnostic)
@@ -519,3 +520,49 @@ jobs:
           path: fun001-v112-battery-sweep-api35/
           retention-days: 90
           if-no-files-found: warn
+
+  # ------------------------------------------------------- diagnosis (2026-11-01)
+  # v1.0.12 store-rejection reproduction: the reviewer's wallet flow against
+  # the sealed artefact with production wallet compositions. Diagnosis only.
+  diag-gate-mock:
+    name: diag GATE cell — Mock wallet (control)
+    if: ${{ inputs.target == 'diag-realwallet' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/diag-suite
+        with:
+          wallet-kind: mock
+          cells: "gate"
+          avd-name: diag-mock
+          mock-private-key: ${{ secrets.MOCK_WALLET_PRIVATE_KEY }}
+          gh-token: ${{ github.token }}
+
+  diag-phantom:
+    name: diag PHANTOM — onboard + native connect + gate (production wallet)
+    if: ${{ inputs.target == 'diag-realwallet' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/diag-suite
+        with:
+          wallet-kind: phantom
+          cells: "onboard connect gate"
+          avd-name: diag-phantom
+          gh-token: ${{ github.token }}
+
+  diag-seedvault:
+    name: diag SEED VAULT SIMULATOR — probe + gate + connect (SDK artefacts)
+    if: ${{ inputs.target == 'diag-realwallet' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/diag-suite
+        with:
+          wallet-kind: seedvault
+          cells: "probe gate connect"
+          avd-name: diag-seedvault
+          gh-token: ${{ github.token }}

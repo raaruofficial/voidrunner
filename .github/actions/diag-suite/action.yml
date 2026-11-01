@@ -1,0 +1,172 @@
+name: VOIDRUNNER rejection-diagnosis suite job
+description: >-
+  One cell of the v1.0.12 store-rejection diagnosis (2026-11-01): boots a
+  PIN-locked AVD on the CI-KVM lane and runs tools/verify-diag-wallet.sh
+  against the sealed, hash-verified v1.0.12 artefact with one wallet
+  composition (mock control / Phantom production / Seed Vault simulator).
+
+inputs:
+  wallet-kind:
+    required: true
+    description: mock | phantom | seedvault
+  cells:
+    required: true
+    description: space-separated diag cells (probe onboard connect gate)
+  avd-name:
+    required: true
+  mock-private-key:
+    required: false
+    default: ""
+    description: Throwaway devnet-only Ed25519 seed for the mock wallet
+  gh-token:
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Enable KVM group permissions
+      shell: bash
+      run: |
+        echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+        sudo udevadm control --reload-rules
+        sudo udevadm trigger --name-match=kvm
+        ls -la /dev/kvm
+
+    - name: Install emulator runtime libraries
+      shell: bash
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq libpulse0 libgl1 libegl1 libnss3 libxcb-cursor0 > /dev/null
+        ldconfig -p | grep -c libpulse || true
+
+    - name: Set up JDK 17 (wallet builds)
+      uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: "17"
+
+    - name: Download sealed v1.0.12 artefact 13031738677 + hash gate
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.gh-token }}
+        EXPECTED_SHA256: bae66b44e4dcfe24d1c0b4332cde26267cd729504e22274a78af3c238e1c72f7
+      run: |
+        set -euo pipefail
+        gh api "repos/raaruofficial/voidrunner/actions/artifacts/13031738677/zip" > /tmp/vr-artefact.zip
+        mkdir -p /tmp/vr-artefact
+        unzip -o /tmp/vr-artefact.zip -d /tmp/vr-artefact
+        cp /tmp/vr-artefact/app-release.apk "$GITHUB_WORKSPACE/voidrunner-sealed.apk"
+        actual="$(sha256sum "$GITHUB_WORKSPACE/voidrunner-sealed.apk" | awk '{print $1}')"
+        echo "sealed APK sha256: $actual"
+        if [ "$actual" != "$EXPECTED_SHA256" ]; then
+          echo "::error::Sealed APK hash mismatch — aborting before any run"
+          exit 1
+        fi
+
+    - name: Prepare wallet (mock — build pinned source)
+      if: inputs.wallet-kind == 'mock'
+      shell: bash
+      env:
+        MOCK_COMMIT: d444aff0c72dadd0f5c442ea2bc3559b62916e01
+        MOCK_PK: ${{ inputs.mock-private-key }}
+      run: |
+        set -euo pipefail
+        git clone https://github.com/solana-mobile/mock-mwa-wallet "$GITHUB_WORKSPACE/mock-src"
+        cd "$GITHUB_WORKSPACE/mock-src"
+        git checkout "$MOCK_COMMIT"
+        {
+          printf 'privateKey=%s\n' "$MOCK_PK"
+          printf 'walletName=%s\n' "VRTestWallet"
+          printf 'sdk.dir=%s\n' "$ANDROID_HOME"
+        } > local.properties
+        chmod +x gradlew
+        ./gradlew :app:assembleDebug --console=plain --no-daemon 2>&1 | tail -n 25
+        ls -la app/build/outputs/apk/debug/app-debug.apk
+
+    - name: Prepare wallet (phantom — production release from repo release asset)
+      if: inputs.wallet-kind == 'phantom'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.gh-token }}
+        EXPECTED_APKM_SHA256: 3edb81479f5bb15eb35c0526dca4c7b0325cd7aafd0e86a0f9e69b19ae2c2600
+      run: |
+        set -euo pipefail
+        cd "$GITHUB_WORKSPACE"
+        gh release download diag-wallets-2026-11-01 --pattern 'phantom-26.23.1.apkm' --dir /tmp/phantom
+        actual="$(sha256sum /tmp/phantom/phantom-26.23.1.apkm | awk '{print $1}')"
+        echo "phantom APKM sha256: $actual"
+        if [ "$actual" != "$EXPECTED_APKM_SHA256" ]; then
+          echo "::error::Phantom APKM hash mismatch — aborting"
+          exit 1
+        fi
+        mkdir -p "$GITHUB_WORKSPACE/phantom-bundle"
+        unzip -o /tmp/phantom/phantom-26.23.1.apkm -d "$GITHUB_WORKSPACE/phantom-bundle" > /dev/null
+        ls "$GITHUB_WORKSPACE/phantom-bundle" | head -40
+        # provenance: signing certificate of the production base APK
+        APKSIGNER="$(find "$ANDROID_HOME/build-tools" -name apksigner | sort | tail -1)"
+        "$APKSIGNER" verify --print-certs "$GITHUB_WORKSPACE/phantom-bundle/base.apk" > "$GITHUB_WORKSPACE/phantom-cert.txt" 2>&1 || true
+        cat "$GITHUB_WORKSPACE/phantom-cert.txt"
+
+    - name: Prepare wallet (seedvault — build SDK simulator + fakewallet)
+      if: inputs.wallet-kind == 'seedvault'
+      shell: bash
+      env:
+        SV_COMMIT: f676e2a580c237664f35e24518a939ed4406c051
+      run: |
+        set -uo pipefail
+        git clone https://github.com/solana-mobile/seed-vault-sdk "$GITHUB_WORKSPACE/sv-src"
+        cd "$GITHUB_WORKSPACE/sv-src"
+        git checkout "$SV_COMMIT" || true
+        git rev-parse HEAD
+        yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-37" > /tmp/sv-sdkmanager.log 2>&1 || true
+        printf 'sdk.dir=%s\n' "$ANDROID_HOME" > local.properties
+        chmod +x gradlew
+        ./gradlew :SeedVaultSimulator:assembleDebug :fakewallet:assembleGenericDebug \
+          --console=plain --no-daemon > /tmp/sv-build.log 2>&1
+        echo "gradle exit: $?"
+        tail -n 30 /tmp/sv-build.log
+        find . -path "*outputs/apk*" -name "*.apk" | tee /tmp/sv-apks.txt
+        cp /tmp/sv-build.log "$GITHUB_WORKSPACE/sv-build.log" || true
+
+    - name: Run diag suite on PIN-locked AVD (API 36)
+      uses: reactivecircus/android-emulator-runner@v2
+      env:
+        OUT: fun001-diag-evidence-${{ inputs.wallet-kind }}
+        WALLET_KIND: ${{ inputs.wallet-kind }}
+        CELLS: ${{ inputs.cells }}
+        VR_APK: ${{ github.workspace }}/voidrunner-sealed.apk
+        MOCK_APK: ${{ github.workspace }}/mock-src/app/build/outputs/apk/debug/app-debug.apk
+        PHANTOM_DIR: ${{ github.workspace }}/phantom-bundle
+        DEVICE_PIN: "1234"
+      with:
+        api-level: "36"
+        target: google_apis
+        arch: x86_64
+        profile: pixel_7_pro
+        avd-name: ${{ inputs.avd-name }}
+        force-avd-creation: true
+        emulator-boot-timeout: 1200
+        ram-size: 8192
+        disable-animations: true
+        emulator-options: -no-window -gpu swiftshader_indirect -memory 8192 -no-boot-anim -camera-back none -camera-front none
+        script: |
+          export WALLET_PKG="com.solana.mwallet"
+          if [ "$WALLET_KIND" = "phantom" ]; then export WALLET_PKG="app.phantom"; fi
+          if [ "$WALLET_KIND" = "seedvault" ]; then
+            export WALLET_PKG="com.solanamobile.fakewallet"
+            export SV_SIM_APK="$(find "$GITHUB_WORKSPACE/sv-src/SeedVaultSimulator" -path '*outputs/apk*' -name '*.apk' | head -1)"
+            export SV_FAKE_APK="$(find "$GITHUB_WORKSPACE/sv-src/fakewallet" -path '*outputs/apk*' -name '*.apk' | head -1)"
+            echo "SV_SIM_APK=$SV_SIM_APK SV_FAKE_APK=$SV_FAKE_APK"
+          fi
+          bash tools/verify-diag-wallet.sh
+
+    - name: Upload diag evidence
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: fun001-diag-${{ inputs.wallet-kind }}
+        path: |
+          fun001-diag-evidence-${{ inputs.wallet-kind }}
+          phantom-cert.txt
+          sv-build.log
+        if-no-files-found: warn
