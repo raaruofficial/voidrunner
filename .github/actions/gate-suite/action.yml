@@ -317,6 +317,32 @@ runs:
         adb push "$GATE_CA_CRT" "/data/local/tmp/vr-cacerts/${HASH}.0"
         adb shell 'mount -o bind /data/local/tmp/vr-cacerts /apex/com.android.conscrypt/cacerts' || echo "CA_MOUNT_APEX_FAILED"
         adb shell 'mount -o bind /data/local/tmp/vr-cacerts /system/etc/security/cacerts' || echo "CA_MOUNT_SYSTEM_FAILED"
+        # ADDENDUM #3 execution 2 — repeat the mounts INSIDE
+        # zygote's mount namespace. The mounts above live in
+        # adbd/init's namespace; app processes fork from ZYGOTE,
+        # whose namespace was cloned at boot, before these mounts
+        # existed — so an app forked later can hold a trust-store
+        # view WITHOUT the rig CA even though the mount 'succeeded'.
+        # Run 41410132746 fits that signature exactly: the device
+        # resolved the production hostname to 10.0.2.2 (gate DNS,
+        # answered at PLAY) yet no request reached the rig and the
+        # post-PLAY surface never settled — a TLS abort the old rig
+        # could not even log (socketserver swallows accept-time
+        # SSLError; the rig now logs per-connection TLS outcomes).
+        # Mounting into zygote's namespace makes every app forked
+        # from now on inherit the rig trust store. Diagnostic-
+        # grade: every outcome is echoed, nothing here is fatal —
+        # the cell grades what it sees.
+        if adb shell 'command -v nsenter' >/dev/null 2>&1; then
+          for zp in $(adb shell pidof zygote zygote64 2>/dev/null | tr -d '\r'); do
+            adb shell "nsenter -t $zp -m mount -o bind /data/local/tmp/vr-cacerts /apex/com.android.conscrypt/cacerts" \
+              && echo "ZYGOTE_CA_MOUNT_OK pid=$zp apex" || echo "ZYGOTE_CA_MOUNT_FAILED pid=$zp apex"
+            adb shell "nsenter -t $zp -m mount -o bind /data/local/tmp/vr-cacerts /system/etc/security/cacerts" \
+              && echo "ZYGOTE_CA_MOUNT_OK pid=$zp system" || echo "ZYGOTE_CA_MOUNT_FAILED pid=$zp system"
+          done
+        else
+          echo "ZYGOTE_CA_MOUNT_UNAVAILABLE: nsenter not present on device"
+        fi
         # NO hosts bind-mount (removed, ADDENDUM #2 execution 2): it
         # never took effect for the device resolver in any gate
         # execution — netd reads /system/etc/hosts at its own start,
@@ -339,12 +365,14 @@ runs:
         # dead framework: 'Can't find service: lock_settings', adb
         # install failed). The wallet-suite — this pool's proven
         # cells — never restarts the framework and never CA-mounts.
-        # The mounts precede install/launch, and the app + WebView
-        # processes fork afterwards and read the trust store from
-        # the mounted filesystem at TLS-init; a stale system_server
-        # store is not a consumer of this lane. If the CA is not
-        # trusted, the failure is visible (no rig hits), never
-        # silent — the cell grades it.
+        # The mounts precede install/launch. Whether an app forked
+        # afterwards READS the mounted store depends on its mount
+        # namespace (zygote's clone predates the mounts) — that is
+        # what the nsenter repeat above is for; a stale
+        # system_server store is not a consumer of this lane. If
+        # the CA is still not trusted, the rig's per-connection TLS
+        # log shows the aborted handshake — visible, never silent —
+        # and the cell grades it.
         adb wait-for-device
         for i in $(seq 1 20); do
           [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ] && break
@@ -352,6 +380,16 @@ runs:
         done
         adb shell service check lock_settings || echo "SERVICE_UNHEALTHY_AT_START: lock_settings"
         adb shell ping -c 1 -w 5 voidrunner-2hm7p.ondigitalocean.app || echo "RIG_PING_FAILED"
+        # Second resolver reading, immediately before the driver
+        # (ADDENDUM #3 exec 2): in run 41410132746 the first ping
+        # ran seconds after boot_completed and printed 'unknown
+        # host', while the DNS log shows the device's forwarded
+        # queries reaching the responder starting ~5 s later — the
+        # first reading raced resolver readiness. This one, taken
+        # after the full surgery + settle, is the resolver state
+        # the driver actually starts against.
+        sleep 10
+        adb shell ping -c 1 -w 5 voidrunner-2hm7p.ondigitalocean.app || echo "RIG_PING2_FAILED"
         exec ./tools/verify-gate-wallet.sh
         WRAP
         chmod +x "${RUNNER_TEMP}/gate-run.sh"

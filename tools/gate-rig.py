@@ -36,10 +36,47 @@ import mimetypes
 import pathlib
 import ssl
 import sys
+import time
 import urllib.parse
 
 STATIC_PREFIXES = ("/assets/",)
 STATIC_EXACT = ("/", "/index.html")
+
+
+def ts():
+    return time.strftime("%H:%M:%S")
+
+
+class RigServer(http.server.ThreadingHTTPServer):
+    """ThreadingHTTPServer that wraps TLS per accepted connection and
+    LOGS every connection + handshake outcome (ADDENDUM #3 exec 2).
+
+    Why: with the listening socket pre-wrapped, a client that aborts
+    the handshake (e.g. it does not trust the rig CA) fails inside
+    socketserver's get_request — and socketserver silently swallows
+    the resulting SSLError (an OSError) with no log line anywhere.
+    Run 41410132746 proved the device resolved the production
+    hostname to this rig (10.0.2.2) yet recorded zero requests and
+    zero errors; the fetch leg was invisible. Here an aborted
+    handshake prints 'RIG tls-FAIL' and a completed one 'RIG conn',
+    so the run's evidence states which leg carried — or refused —
+    the device's fetch."""
+
+    daemon_threads = True
+    tls_ctx: ssl.SSLContext = None
+
+    def get_request(self):
+        raw, addr = self.socket.accept()
+        peer = f"{addr[0]}:{addr[1]}"
+        try:
+            conn = self.tls_ctx.wrap_socket(raw, server_side=True)
+        except (ssl.SSLError, OSError) as e:
+            print(f"[{ts()}] RIG tls-FAIL {peer}: {type(e).__name__}: {e}",
+                  flush=True)
+            raw.close()
+            raise
+        print(f"[{ts()}] RIG conn {peer} tls-ok", flush=True)
+        return conn, addr
 
 
 class RigHandler(http.server.BaseHTTPRequestHandler):
@@ -59,7 +96,7 @@ class RigHandler(http.server.BaseHTTPRequestHandler):
             return
         data = target.read_bytes()
         ctype = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
-        print(f"RIG static {path} -> {target.name} ({len(data)}B)", flush=True)
+        print(f"[{ts()}] RIG static {path} -> {target.name} ({len(data)}B)", flush=True)
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
@@ -75,7 +112,7 @@ class RigHandler(http.server.BaseHTTPRequestHandler):
         headers["Host"] = self.upstream_host
         if body is not None:
             headers["Content-Length"] = str(len(body))
-        print(f"RIG proxy {self.command} {path} -> upstream", flush=True)
+        print(f"[{ts()}] RIG proxy {self.command} {path} -> upstream", flush=True)
         conn_cls = http.client.HTTPSConnection if self.upstream_scheme == "https" else http.client.HTTPConnection
         conn = conn_cls(self.upstream_host, self.upstream_port, timeout=30)
         try:
@@ -91,7 +128,7 @@ class RigHandler(http.server.BaseHTTPRequestHandler):
             if self.command != "HEAD":
                 self.wfile.write(data)
         except Exception as e:  # upstream failure must be loud, not silent
-            print(f"RIG proxy ERROR {self.command} {path}: {e}", flush=True)
+            print(f"[{ts()}] RIG proxy ERROR {self.command} {path}: {e}", flush=True)
             payload = f"gate rig upstream error: {e}".encode()
             self.send_response(502)
             self.send_header("Content-Length", str(len(payload)))
@@ -129,11 +166,11 @@ def main() -> int:
     RigHandler.upstream_host = upstream.hostname
     RigHandler.upstream_port = upstream.port or (443 if RigHandler.upstream_scheme == "https" else 80)
 
-    server = http.server.ThreadingHTTPServer(("0.0.0.0", args.port), RigHandler)
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(args.cert, args.key)
-    server.socket = ctx.wrap_socket(server.socket, server_side=True)
-    print(f"RIG listening :{args.port} serve={args.serve} upstream={args.upstream}", flush=True)
+    RigServer.tls_ctx = ctx
+    server = RigServer(("0.0.0.0", args.port), RigHandler)
+    print(f"[{ts()}] RIG listening :{args.port} serve={args.serve} upstream={args.upstream}", flush=True)
     server.serve_forever()
     return 0
 
