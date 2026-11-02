@@ -584,8 +584,23 @@ jobs:
   # v1.0.12 APK — the rejected composition — must fail with the
   # diagnosis signature). R-4 reuses the wallet/battery jobs above,
   # retargeted by this branch's env pins to the v1.0.13 artefact.
+  #
+  # COMPOSITION ADAPTATION (owner ruling 2026-11-01, "follow their
+  # docs completely"): no .skr fixture can exist for a test wallet —
+  # Solana Mobile's docs mint a .skr once per Seeker device, to the
+  # owner's own Seed Vault accounts only; the Mock key owns none and
+  # none can be registered or bought for it. R-1/R-2 therefore run
+  # against the STAGING composition (server-mode: staging): the
+  # production server bundle (sha256 f487b4fd…9700, hash-gated by
+  # tools/gate-staging/apply-seam.py) running on the runner with ONE
+  # seam stubbed — the ANS registry read returns the Mock key as
+  # owner of the fixture handle (gate_handle input); challenge
+  # issuance, verifyBindSignature, the bind state machine and
+  # session issuance are the production bytes' own. Read-backs
+  # assert against that staging server; the fixture handle's store
+  # rows are janitor-swept + verified zero-residue after each run.
   gate-r1:
-    name: GATE R-1 — cured candidate (bind + proof reps, server read-back)
+    name: GATE R-1 — cured candidate (bind + proof reps, staging read-back)
     if: ${{ inputs.target == 'gate-r1' }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
@@ -600,11 +615,13 @@ jobs:
           serve-dir: tools/gate-fixtures/cure-public
           served-asset: index-b5yayp2h.js
           gate-handle: ${{ inputs.gate_handle }}
+          server-mode: staging
+          fixture-owner: "WGSEgS1wRKJspT4hN8Rw947nX936YdhHRbuqftue9mu"
           avd-name: gate-r1
           mock-private-key: ${{ secrets.MOCK_WALLET_PRIVATE_KEY }}
 
   gate-r2:
-    name: GATE R-2 — negative control (faulted bytes + v1.0.12 shell)
+    name: GATE R-2 — negative control (faulted bytes + v1.0.12 shell, staging)
     if: ${{ inputs.target == 'gate-r2' }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -621,5 +638,7 @@ jobs:
           serve-dir: tools/gate-fixtures/production-public
           served-asset: index-b5yayp2h.js
           gate-handle: ${{ inputs.gate_handle }}
+          server-mode: staging
+          fixture-owner: "WGSEgS1wRKJspT4hN8Rw947nX936YdhHRbuqftue9mu"
           avd-name: gate-r2
           mock-private-key: ${{ secrets.MOCK_WALLET_PRIVATE_KEY }}

@@ -5,8 +5,15 @@ Serves a candidate bundle's static bytes at the PRODUCTION hostname
 on the CI runner, so the sealed shell — whose GAME_URL is compiled
 to the production origin — loads the candidate client, while every
 non-static request (POST /actions, the bind/proof protocol) is
-proxied to the real production origin: server read-back in the gate
-cell is genuine production state, never a stub.
+proxied to the upstream origin.
+
+Upstream modes: production (https://voidrunner-2hm7p.ondigitalocean.app
+— the original R-1/R-2 design) or the GATE STAGING composition
+(http://127.0.0.1:8791 — the production server bundle running on the
+runner with the ANS registry seam stubbed for one fixture handle;
+owner ruling 2026-11-01, R-1 closes by composition). The mode is
+selected by the gate-suite action's server-mode input; the rig only
+forwards, it never stubs.
 
 The runner presents a leaf certificate for the production hostname
 signed by a run-local CA; the gate-suite action installs that CA
@@ -38,6 +45,7 @@ class RigHandler(http.server.BaseHTTPRequestHandler):
     serve_dir: pathlib.Path = pathlib.Path(".")
     upstream_host: str = ""
     upstream_port: int = 443
+    upstream_scheme: str = "https"
 
     def log_message(self, fmt, *args):  # noqa: A003 — keep stderr clean; we log explicitly
         pass
@@ -67,7 +75,8 @@ class RigHandler(http.server.BaseHTTPRequestHandler):
         if body is not None:
             headers["Content-Length"] = str(len(body))
         print(f"RIG proxy {self.command} {path} -> upstream", flush=True)
-        conn = http.client.HTTPSConnection(self.upstream_host, self.upstream_port, timeout=30)
+        conn_cls = http.client.HTTPSConnection if self.upstream_scheme == "https" else http.client.HTTPConnection
+        conn = conn_cls(self.upstream_host, self.upstream_port, timeout=30)
         try:
             conn.request(self.command, path, body=body, headers=headers)
             resp = conn.getresponse()
@@ -115,8 +124,9 @@ def main() -> int:
 
     upstream = urllib.parse.urlsplit(args.upstream)
     RigHandler.serve_dir = pathlib.Path(args.serve)
+    RigHandler.upstream_scheme = upstream.scheme or "https"
     RigHandler.upstream_host = upstream.hostname
-    RigHandler.upstream_port = upstream.port or 443
+    RigHandler.upstream_port = upstream.port or (443 if RigHandler.upstream_scheme == "https" else 80)
 
     server = http.server.ThreadingHTTPServer(("0.0.0.0", args.port), RigHandler)
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)

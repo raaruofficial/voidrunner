@@ -5,9 +5,14 @@
 # fixture handle → SIGN IN → the gate's wallet action ("Link my
 # wallet" in bind mode / "Prove it's you" in proof mode) → the Mock
 # MWA Wallet FOREGROUNDS → approve its sheet → completion asserted by
-# PRODUCTION SERVER STATE (a runner-side /actions signIn read-back:
-# bind_required before the bind rep, proof_required after it — the
-# transition exists only if completeBind persisted the binding).
+# SERVER STATE (a runner-side /actions signIn read-back against
+# ORIGIN: bind_required before the bind rep, proof_required after
+# it — the transition exists only if completeBind persisted the
+# binding). ORIGIN is the production origin in server-mode=production
+# and the on-runner STAGING composition (production server bundle,
+# registry seam stubbed for the fixture handle) in
+# server-mode=staging — the owner's 2026-11-01 composition ruling;
+# this driver is identical in both modes.
 #
 # Modes (GATE_MODE):
 #   r1 — the cured candidate: candidate served bytes (via the
@@ -26,7 +31,9 @@
 #   MOCK_APK      path to the Mock MWA Wallet APK
 #   GATE_HANDLE   lane-designated fixture handle, full form (name.skr)
 #   GATE_MODE     r1 | r2
-#   ORIGIN        production origin for read-backs (direct, runner-side)
+#   ORIGIN        server origin for read-backs (direct, runner-side;
+#                 production origin or the staging composition,
+#                 per the gate-suite server-mode)
 #   RIG_LOG       serving-rig log to mine for served-bytes evidence
 #   SERVED_ASSET  JS asset filename the device must have fetched via the rig
 #   OUT           evidence dir
