@@ -35,10 +35,37 @@ on:
           - build
           - validate
         default: build
+  # Branch-push trigger: GitHub will not dispatch a workflow that does
+  # not exist on the default branch, and this prep lives on its own
+  # branch by design. A push to the branch runs the stage named in
+  # tools/ftl-gate/STAGE (build | validate); workflow_dispatch (once
+  # available) overrides it via the input.
+  push:
+    branches:
+      - ftl/r1-gate-prep
 
 jobs:
+  prep:
+    name: Resolve stage
+    runs-on: ubuntu-latest
+    outputs:
+      stage: ${{ steps.stage.outputs.stage }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: stage
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "stage=${{ inputs.stage }}" >> "$GITHUB_OUTPUT"
+          else
+            S="$(tr -d '[:space:]' < tools/ftl-gate/STAGE 2>/dev/null || echo build)"
+            [ "$S" = "validate" ] || S="build"
+            echo "stage=$S" >> "$GITHUB_OUTPUT"
+          fi
+          echo "resolved stage: $(grep stage $GITHUB_OUTPUT)"
+
   build:
     name: Build staging shell + gate test APK + Mock wallet
+    needs: prep
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -132,8 +159,8 @@ jobs:
 
   validate:
     name: Validate the FTL construction (emulator, staging origin)
-    needs: build
-    if: ${{ inputs.stage == 'validate' }}
+    needs: [prep, build]
+    if: ${{ needs.prep.outputs.stage == 'validate' }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
     env:
