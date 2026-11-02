@@ -1,0 +1,182 @@
+name: VOIDRUNNER gate suite (v1.0.13 cure R-1/R-2)
+description: >
+  The §2 gate cell: builds the pinned Mock MWA Wallet, hash-gates the
+  APK under test, starts the serving rig (candidate static bytes at
+  the production hostname via a run-local CA; everything else proxied
+  to the real production origin), performs the trust-store + hosts
+  surgery on a PIN-locked API 36 AVD, and runs
+  tools/verify-gate-wallet.sh. The APK run/artefact come from the
+  FUN001_APK_RUN_ID / FUN001_APK_ARTIFACT env (workflow pins); the
+  hash gate uses the caller job's EXPECTED_SHA256 / VERSION_STAMP env.
+inputs:
+  api-level:
+    description: Android API level for the AVD
+    required: false
+    default: "36"
+  avd-name:
+    description: AVD name
+    required: true
+  mock-private-key:
+    description: Mock wallet throwaway private key (repo secret)
+    required: true
+  gate-mode:
+    description: "r1 (cured candidate, bind+proof reps) or r2 (negative control)"
+    required: true
+  serve-dir:
+    description: Repo-relative dir whose bytes the rig serves as the client
+    required: true
+  served-asset:
+    description: JS asset filename the device must fetch through the rig
+    required: true
+  gate-handle:
+    description: Lane-designated fixture handle (full form, name.skr)
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Resolve Mock MWA Wallet ref (pinned in-repo)
+      id: mockref
+      shell: bash
+      run: |
+        REF="$(tr -d '[:space:]' < tools/mockwallet-ref.txt)"
+        echo "ref=$REF" >> "$GITHUB_OUTPUT"
+        echo "Mock MWA Wallet ref: $REF"
+    - name: Cache Mock MWA Wallet checkout
+      id: mockcache
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}/mockwallet-src
+        key: mockwallet-${{ steps.mockref.outputs.ref }}-v2
+    - name: Check out Mock MWA Wallet (pinned)
+      if: steps.mockcache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        git clone https://github.com/solana-mobile/mock-mwa-wallet.git "${RUNNER_TEMP}/mockwallet-src"
+        git -C "${RUNNER_TEMP}/mockwallet-src" checkout "${{ steps.mockref.outputs.ref }}"
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: "17"
+    - name: Set up Gradle
+      uses: gradle/actions/setup-gradle@v4
+      with:
+        gradle-version: "8.11.1"
+    - name: Decode mock wallet key + build Mock MWA Wallet
+      shell: bash
+      env:
+        MOCK_WALLET_PRIVATE_KEY: ${{ inputs.mock-private-key }}
+      run: |
+        mkdir -p "${RUNNER_TEMP}/mockwallet-src/app/src/main/res/raw"
+        printf '%s' "$MOCK_WALLET_PRIVATE_KEY" \
+          | base64 --decode \
+          > "${RUNNER_TEMP}/mockwallet-src/app/src/main/res/raw/private_key"
+        cd "${RUNNER_TEMP}/mockwallet-src"
+        gradle :app:assembleDebug --stacktrace
+        MOCK_APK="$(find "${RUNNER_TEMP}/mockwallet-src/app/build/outputs/apk" -name '*.apk' | head -n 1)"
+        echo "MOCK_APK=$MOCK_APK" >> "$GITHUB_ENV"
+        echo "Mock wallet built: $MOCK_APK"
+    - name: Download sealed APK artefact + verify its sha256
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        echo "Hash gate: run=${FUN001_APK_RUN_ID} artefact=${FUN001_APK_ARTIFACT} stamp=${VERSION_STAMP}"
+        mkdir -p "${RUNNER_TEMP}/vr-apk"
+        gh run download "${FUN001_APK_RUN_ID}" --name "${FUN001_APK_ARTIFACT}" --dir "${RUNNER_TEMP}/vr-apk"
+        VR_APK="$(find "${RUNNER_TEMP}/vr-apk" -name '*.apk' | head -n 1)"
+        echo "Downloaded: $VR_APK"
+        ACTUAL="$(sha256sum "$VR_APK" | cut -d' ' -f1)"
+        echo "sha256: $ACTUAL (expected ${EXPECTED_SHA256})"
+        if [ "$ACTUAL" != "${EXPECTED_SHA256}" ]; then
+          echo "::error::APK hash mismatch — refusing to test an unsealed binary"
+          exit 1
+        fi
+        echo "VR_APK=$VR_APK" >> "$GITHUB_ENV"
+    - name: Serving rig — CA, leaf cert, start
+      shell: bash
+      run: |
+        set -euo pipefail
+        HOST="voidrunner-2hm7p.ondigitalocean.app"
+        RIG_DIR="${RUNNER_TEMP}/rig"
+        mkdir -p "$RIG_DIR"
+        # Run-local CA (never leaves the runner; the emulator store copy
+        # dies with the AVD).
+        openssl req -x509 -newkey rsa:2048 -keyout "$RIG_DIR/ca.key" -out "$RIG_DIR/ca.crt" \
+          -days 2 -nodes -subj "/CN=VOIDRUNNER gate rig CA" 2>/dev/null
+        # Leaf for the production hostname, SAN-signed by the CA.
+        openssl req -newkey rsa:2048 -keyout "$RIG_DIR/leaf.key" -out "$RIG_DIR/leaf.csr" \
+          -nodes -subj "/CN=$HOST" 2>/dev/null
+        printf 'subjectAltName=DNS:%s\n' "$HOST" > "$RIG_DIR/san.cnf"
+        openssl x509 -req -in "$RIG_DIR/leaf.csr" -CA "$RIG_DIR/ca.crt" -CAkey "$RIG_DIR/ca.key" \
+          -CAcreateserial -out "$RIG_DIR/leaf.crt" -days 2 -extfile "$RIG_DIR/san.cnf" 2>/dev/null
+        cat "$RIG_DIR/leaf.crt" "$RIG_DIR/leaf.key" > "$RIG_DIR/leaf.pem"
+        echo "GATE_CA_CRT=$RIG_DIR/ca.crt" >> "$GITHUB_ENV"
+        echo "RIG_LOG=$RIG_DIR/rig.log" >> "$GITHUB_ENV"
+        sudo nohup python3 tools/gate-rig.py \
+          --cert "$RIG_DIR/leaf.pem" --key "$RIG_DIR/leaf.pem" \
+          --serve "${{ inputs.serve-dir }}" \
+          --upstream "https://$HOST" --port 443 \
+          > "$RIG_DIR/rig.log" 2>&1 &
+        sleep 2
+        head -n 2 "$RIG_DIR/rig.log" || true
+        curl -sk --cacert "$RIG_DIR/ca.crt" "https://$HOST:443/" --resolve "$HOST:443:127.0.0.1" \
+          -o /dev/null -w 'rig self-check: HTTP %{http_code}\n' || echo "rig self-check FAILED (see rig log in evidence)"
+    - name: Write gate runner wrapper (rig surgery + driver)
+      shell: bash
+      run: |
+        cat > "${RUNNER_TEMP}/gate-run.sh" <<'WRAP'
+        #!/usr/bin/env bash
+        # Runs INSIDE the emulator-runner step, device up. Performs the
+        # trust-store + hosts surgery, restarts the framework so new
+        # processes pick up the store, then execs the gate driver.
+        set -x
+        adb root || true
+        adb wait-for-device
+        HASH="$(openssl x509 -subject_hash_old -in "$GATE_CA_CRT" | sed -n '1p')"
+        adb shell 'rm -rf /data/local/tmp/vr-cacerts; mkdir -p /data/local/tmp/vr-cacerts; cp /apex/com.android.conscrypt/cacerts/* /data/local/tmp/vr-cacerts/ 2>/dev/null; cp /system/etc/security/cacerts/* /data/local/tmp/vr-cacerts/ 2>/dev/null; ls /data/local/tmp/vr-cacerts | wc -l'
+        adb push "$GATE_CA_CRT" "/data/local/tmp/vr-cacerts/${HASH}.0"
+        adb shell 'mount -o bind /data/local/tmp/vr-cacerts /apex/com.android.conscrypt/cacerts' || echo "CA_MOUNT_APEX_FAILED"
+        adb shell 'mount -o bind /data/local/tmp/vr-cacerts /system/etc/security/cacerts' || echo "CA_MOUNT_SYSTEM_FAILED"
+        adb shell 'cp /system/etc/hosts /data/local/tmp/vr-hosts && echo "10.0.2.2 voidrunner-2hm7p.ondigitalocean.app" >> /data/local/tmp/vr-hosts && mount -o bind /data/local/tmp/vr-hosts /system/etc/hosts' || echo "HOSTS_MOUNT_FAILED"
+        adb shell stop || true
+        sleep 3
+        adb shell start || true
+        adb wait-for-device
+        for i in $(seq 1 60); do
+          [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ] && break
+          sleep 3
+        done
+        adb shell ping -c 1 -w 5 voidrunner-2hm7p.ondigitalocean.app || echo "RIG_PING_FAILED"
+        exec ./tools/verify-gate-wallet.sh
+        WRAP
+        chmod +x "${RUNNER_TEMP}/gate-run.sh"
+    - name: Gate cell — rig-served client, PIN-locked AVD (API ${{ inputs.api-level }})
+      uses: reactivecircus/android-emulator-runner@v2
+      env:
+        OUT: gate-evidence
+        GATE_MODE: ${{ inputs.gate-mode }}
+        GATE_HANDLE: ${{ inputs.gate-handle }}
+        SERVED_ASSET: ${{ inputs.served-asset }}
+        ORIGIN: https://voidrunner-2hm7p.ondigitalocean.app
+      with:
+        api-level: ${{ inputs.api-level }}
+        target: google_apis
+        arch: x86_64
+        profile: pixel_6
+        avd-name: ${{ inputs.avd-name }}
+        cores: 2
+        ram-size: 4096M
+        emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -no-snapshot-save
+        disable-animations: true
+        script: ${{ runner.temp }}/gate-run.sh
+    - name: Upload gate evidence
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: gate-evidence-${{ inputs.gate-mode }}-${{ inputs.avd-name }}
+        path: |
+          gate-evidence/**
+          ${{ runner.temp }}/rig/rig.log
+        retention-days: 90

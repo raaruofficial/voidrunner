@@ -64,7 +64,14 @@ on:
           - battery-sweep-api35
           - everything
           - diag-realwallet
+          - gate-r1
+          - gate-r2
         default: wallet-core-api36
+      gate_handle:
+        description: Gate cell fixture handle (full form, name.skr) — gate targets only
+        type: string
+        default: ""
+        required: false
       vr12_observe_s:
         description: VR-12 observation window seconds (30 = cell; 150 = diagnostic)
         type: string
@@ -76,9 +83,11 @@ permissions:
   actions: read
 
 env:
-  ARTEFACT_ID: "13031738677"
-  EXPECTED_SHA256: "bae66b44e4dcfe24d1c0b4332cde26267cd729504e22274a78af3c238e1c72f7"
-  VERSION_STAMP: "v1.0.12 (12)"
+  # v1.0.13 cure battery pinning (cure/v113-battery branch): the sealed
+  # v1.0.13 candidate, Android CI 41364349885, artefact 13106393083.
+  ARTEFACT_ID: "13106393083"
+  EXPECTED_SHA256: "56133172874dcada929edadb64c8c88eb730a37d0e1fb8aee9215a3219d584a8"
+  VERSION_STAMP: "v1.0.13 (13)"
 
 jobs:
   # ---------------------------------------------------------------- wallet
@@ -566,3 +575,51 @@ jobs:
           cells: "probe gate connect"
           avd-name: diag-seedvault
           gh-token: ${{ github.token }}
+
+  # ------------------------------------------------------------- cure gate (§2)
+  # v1.0.13 resubmission battery: R-1 the gate cell on the cured
+  # candidate (candidate served bytes via the serving rig + the sealed
+  # v1.0.13 APK, bind + proof reps, server read-back), R-2 the negative
+  # control (production faulted bytes via the same rig + the sealed
+  # v1.0.12 APK — the rejected composition — must fail with the
+  # diagnosis signature). R-4 reuses the wallet/battery jobs above,
+  # retargeted by this branch's env pins to the v1.0.13 artefact.
+  gate-r1:
+    name: GATE R-1 — cured candidate (bind + proof reps, server read-back)
+    if: ${{ inputs.target == 'gate-r1' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      FUN001_APK_RUN_ID: "41364349885"
+      FUN001_APK_ARTIFACT: "voidrunner-release-apk"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/gate-suite
+        with:
+          gate-mode: r1
+          serve-dir: tools/gate-fixtures/cure-public
+          served-asset: index-b5yayp2h.js
+          gate-handle: ${{ inputs.gate_handle }}
+          avd-name: gate-r1
+          mock-private-key: ${{ secrets.MOCK_WALLET_PRIVATE_KEY }}
+
+  gate-r2:
+    name: GATE R-2 — negative control (faulted bytes + v1.0.12 shell)
+    if: ${{ inputs.target == 'gate-r2' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      FUN001_APK_RUN_ID: "41174484548"
+      FUN001_APK_ARTIFACT: "voidrunner-release-apk"
+      EXPECTED_SHA256: "bae66b44e4dcfe24d1c0b4332cde26267cd729504e22274a78af3c238e1c72f7"
+      VERSION_STAMP: "v1.0.12 (12)"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/gate-suite
+        with:
+          gate-mode: r2
+          serve-dir: tools/gate-fixtures/production-public
+          served-asset: index-b5yayp2h.js
+          gate-handle: ${{ inputs.gate_handle }}
+          avd-name: gate-r2
+          mock-private-key: ${{ secrets.MOCK_WALLET_PRIVATE_KEY }}
