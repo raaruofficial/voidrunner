@@ -40,6 +40,22 @@
 #
 # Fixture discipline (binding): only the lane-designated fixture
 # handle is ever typed; midge.skr is HANDLE_RESERVED and never used.
+#
+# RE-HOST (2026-11-01, SEAL_V113 ADDENDUM #2): the device
+# choreography now runs on the wallet-suite's proven driver lineage.
+# Root cause of the 7-execution rig failure, from the gate runs' own
+# logs (e.g. run 41396257103): the gate-suite action never granted
+# KVM permissions, so the emulator launched with '-accel off'
+# (ProbeKVM: "This user doesn't have permissions to use KVM") —
+# 12–16-minute boots, uiautomator dumps timing out from the first
+# call, installs failing. The wallet-suite action grants KVM first.
+# Ported here: v104 r17's helper bodies verbatim (dump_is_substantive
+# acceptance, fg_pkg window-focus parse, authenticate_mock with its
+# keyguard-landing recovery, dismiss_host_anr host-only variant,
+# enroll/satisfy/ensure helpers), its security prelude (PIN verify
+# read-back, device-info), its install order (mock → Authenticate →
+# APK under test), and ensure_unlocked at gate-navigation entry. The
+# gate flow and every PASS criterion are unchanged.
 set -u
 
 PKG="com.voidrunner.app"
@@ -62,6 +78,10 @@ mkdir -p "$OUT"
 : > "$LANE_LOG"
 log() { echo "$*" | tee -a "$LANE_LOG"; }
 
+AUTH_EPOCH_FILE="$OUT/auth-epoch.txt"
+auth_note="not attempted"
+lock_pin="unknown"; lock_fp="unknown"
+
 FAILCOPY_RE="Wallet signing didn't complete|wallet didn't return a signature|cancelled before the wallet returned"
 HANDLE_LOCAL="${GATE_HANDLE%.skr}"
 
@@ -81,13 +101,28 @@ except Exception as e:
 }
 
 # --- UI helpers (carried from the lane drivers, verify-v104 r17 / diag) ---------
+dump_is_substantive() { # rejects hollow mid-transition dumps (1 node, no
+  # text/content-desc, no WebView) — a race artifact, not a screen.
+  python3 - "$1" <<'PY'
+import re, sys
+data = open(sys.argv[1], encoding="utf-8", errors="ignore").read()
+nodes = re.findall(r"<node[^>]*>", data)
+if len(nodes) >= 3:
+    sys.exit(0)
+for n in nodes:
+    if re.search(r'text="[^"]+"', n) or re.search(r'content-desc="[^"]+"', n) or "WebView" in n:
+        sys.exit(0)
+sys.exit(1)
+PY
+}
+
 dump_ui() { # $1 = destination file
   local dst="$1" attempt
   for attempt in 1 2 3 4 5 6 7 8; do
     adb shell rm -f /sdcard/window_dump.xml >/dev/null 2>&1 || true
     timeout 40 adb shell uiautomator dump /sdcard/window_dump.xml >/dev/null 2>&1 || true
     adb exec-out cat /sdcard/window_dump.xml > "$dst.tmp" 2>/dev/null || true
-    if grep -q "</hierarchy>" "$dst.tmp" 2>/dev/null; then
+    if grep -q "</hierarchy>" "$dst.tmp" 2>/dev/null && dump_is_substantive "$dst.tmp"; then
       mv "$dst.tmp" "$dst"
       return 0
     fi
@@ -97,13 +132,15 @@ dump_ui() { # $1 = destination file
   return 1
 }
 
-tap_text() { # $1 = hierarchy file, $2 = substring (exact-text fallback included)
+tap_text() { # $1 = hierarchy file, $2 = substring
   local coords
   coords="$(python3 - "$1" "$2" <<'PY'
 import re, sys
 data = open(sys.argv[1], encoding="utf-8", errors="ignore").read()
 for m in re.finditer(r'text="([^"]*' + re.escape(sys.argv[2]) + r'[^"]*)"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', data):
-    print(f"{(int(m.group(2)) + int(m.group(4))) // 2} {(int(m.group(3)) + int(m.group(5))) // 2}")
+    x = (int(m.group(2)) + int(m.group(4))) // 2
+    y = (int(m.group(3)) + int(m.group(5))) // 2
+    print(f"{x} {y}")
     break
 PY
 )"
@@ -111,18 +148,55 @@ PY
   return 1
 }
 
+tap_exact() { # $1 = hierarchy file, $2 = exact text
+  local coords
+  coords="$(python3 - "$1" "$2" <<'PY'
+import re, sys
+data = open(sys.argv[1], encoding="utf-8", errors="ignore").read()
+for m in re.finditer(r'<node[^>]*>', data):
+    tag = m.group(0)
+    t = re.search(r'text="([^"]*)"', tag)
+    b = re.search(r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', tag)
+    if t and b and t.group(1) == sys.argv[2]:
+        x = (int(b.group(1)) + int(b.group(3))) // 2
+        y = (int(b.group(2)) + int(b.group(4))) // 2
+        print(f"{x} {y}")
+        break
+PY
+)"
+  if [ -n "$coords" ]; then adb shell input tap $coords; return 0; fi
+  return 1
+}
+
+tap_frac() {
+  local wh w h x y
+  wh="$(adb shell wm size 2>/dev/null | sed -n 's/.*: \([0-9]*\)x\([0-9]*\).*/\1 \2/p' | head -n 1)"
+  w="$(printf '%s' "$wh" | awk '{print $1}')"; h="$(printf '%s' "$wh" | awk '{print $2}')"
+  [ -n "$w" ] && [ -n "$h" ] || { w=1080; h=2400; }
+  x="$(awk -v w="$w" -v f="$1" 'BEGIN{printf "%d", w*f}')"
+  y="$(awk -v h="$h" -v f="$2" 'BEGIN{printf "%d", h*f}')"
+  adb shell input tap "$x" "$y"
+}
+
 fg_pkg() {
-  adb shell dumpsys activity activities 2>/dev/null \
-    | grep -m1 'topResumedActivity' | sed -E 's/.* ([a-zA-Z0-9_.]+)\/.*/\1/' | tr -d '\r'
+  local f
+  f="$(adb shell dumpsys window windows 2>/dev/null | sed -n 's/.*mCurrentFocus=Window{[^ ]* [^ ]* \([^/]*\)\/.*/\1/p' | head -n 1 | tr -d '\r')"
+  if [ -z "$f" ]; then
+    f="$(adb shell dumpsys activity activities 2>/dev/null | sed -n 's/.*topResumedActivity=ActivityRecord{[^ ]* [^ ]* \([^/]*\)\/.*/\1/p' | head -n 1 | tr -d '\r')"
+  fi
+  printf '%s' "$f"
 }
 
 snap() { adb exec-out screencap -p > "$OUT/$1" 2>/dev/null || true; }
 
-dismiss_host_anr() {
-  local f="$TMPD/anr.xml"
-  if dump_ui "$f" && grep -q "isn't responding" "$f"; then
-    tap_text "$f" "Wait" || true
-    sleep 1
+dismiss_host_anr() { # if a host (launcher/System UI) ANR dialog is up, tap Wait
+  local f="$TMPD/anr-check.xml"
+  if dump_ui "$f" && grep -q "isn.t responding" "$f"; then
+    if grep -q "Pixel Launcher isn.t responding\|System UI isn.t responding" "$f"; then
+      log "anr: host dialog present; tapping Wait"
+      tap_text "$f" "Wait" || tap_frac 0.66 0.54
+      sleep 2
+    fi
   fi
 }
 
@@ -137,7 +211,12 @@ wait_for() { # $1 = grep pattern, $2 = timeout secs, $3 = dump file
   grep -qE "$pat" "$dst" 2>/dev/null
 }
 
-looks_locked() { # $1 = dump file
+looks_locked() { # $1 = dump file; keyguard/AOD heuristics (driver r7)
+  # v105 r1 starved BOTH core jobs behind a keyguard presentation the
+  # r5 triggers missed: an all-SystemUI hierarchy whose only texts are
+  # the clock, carrier and 'Unlock for all features and data' — no
+  # 'Swipe up to open' string, and fg_pkg's focus parse never yielded
+  # 'com.android.systemui'. Detect the state structurally instead.
   python3 - "$1" <<'PY'
 import re, sys
 try:
@@ -158,24 +237,27 @@ ensure_unlocked() {
   dump_ui "$f" || return 0
   if ! looks_locked "$f" && [ "$(fg_pkg)" != "com.android.systemui" ]; then return 0; fi
   for try in 1 2 3; do
-    adb shell input keyevent 224 >/dev/null 2>&1 || true
+    log "lock: keyguard appears engaged (try $try; fg=$(fg_pkg)); wake + swipe + PIN unlock"
+    adb shell input keyevent 224 >/dev/null 2>&1 || true  # WAKEUP
     sleep 1
-    adb shell input keyevent 82 >/dev/null 2>&1 || true
+    adb shell input keyevent 82 >/dev/null 2>&1 || true   # MENU — dismisses AOD on some images
     sleep 1
     adb shell input swipe 540 2200 540 700 300 >/dev/null 2>&1 || true
     sleep 1
+    # Send the PIN only if the post-swipe surface still looks like a
+    # credential gate (never type blindly into an unlocked UI).
     if dump_ui "$f" && looks_locked "$f"; then
       adb shell input text "$DEVICE_PIN" >/dev/null 2>&1 || true
       adb shell input keyevent 66 >/dev/null 2>&1 || true
       sleep 2
     fi
     dump_ui "$f" || return 0
-    if ! looks_locked "$f"; then return 0; fi
+    if ! looks_locked "$f"; then log "lock: unlocked on try $try"; return 0; fi
   done
   log "lock: STILL LOCKED after 3 unlock attempts"
 }
 
-satisfy_auth_prompt() {
+satisfy_auth_prompt() { # works the biometric/PIN prompt until it clears
   local f="$TMPD/auth.xml" i
   for i in 1 2 3 4 5 6; do
     sleep 2
@@ -185,6 +267,7 @@ satisfy_auth_prompt() {
       sleep 2
       dump_ui "$f" || return 1
       if grep -q "Log in to" "$f"; then
+        # fall back to device credential
         tap_text "$f" "Use PIN" || tap_text "$f" "PIN" || true
         sleep 1
         adb shell input text "$DEVICE_PIN" >/dev/null 2>&1 || true
@@ -200,16 +283,44 @@ satisfy_auth_prompt() {
 }
 
 # --- device security (binding recipe: PIN-locked AVD + enrolled fingerprint) ----
+# (Prelude + helpers re-hosted on the wallet-suite driver, verify-v104
+# r17 — REPORT_V112's proven lineage — 2026-11-01; see the re-host note
+# in this file's header and SEAL_V113 ADDENDUM #2.)
+{
+  echo "sdk=$(adb shell getprop ro.build.version.sdk 2>/dev/null | tr -d '\r')"
+  echo "release=$(adb shell getprop ro.build.version.release 2>/dev/null | tr -d '\r')"
+  echo "fingerprint=$(adb shell getprop ro.build.fingerprint 2>/dev/null | tr -d '\r')"
+  echo "model=$(adb shell getprop ro.product.model 2>/dev/null | tr -d '\r')"
+  echo "meminfo=$(adb shell cat /proc/meminfo 2>/dev/null | head -n 1 | tr -d '\r')"
+} > "$OUT/device-info.txt"
+cat "$OUT/device-info.txt" | tee -a "$LANE_LOG"
+
 log "security: setting device PIN via locksettings"
 adb shell locksettings set-pin "$DEVICE_PIN" >> "$LANE_LOG" 2>&1 || true
+if adb shell locksettings verify --old "$DEVICE_PIN" >/dev/null 2>&1; then
+  lock_pin="set+verified (PIN $DEVICE_PIN)"
+else
+  # verify subcommand support varies; fall back to lock-state probe
+  ls_state="$(adb shell dumpsys lock_settings 2>/dev/null | grep -i "credential" | head -n 2 | tr -d '\r')"
+  log "security: locksettings verify unsupported; dumpsys lock_settings: $ls_state"
+  lock_pin="set (locksettings set-pin issued, PIN $DEVICE_PIN)"
+fi
+log "security: lock_pin=$lock_pin"
+# The PIN lock stays (binding), but the AVD must not lock ITSELF
+# mid-cell: screen/lock timeouts to max + stay-on-USB (the wallet
+# suite's r4 cure for keyguard starvation during idle waits).
 adb shell settings put system screen_off_timeout 2147483647 >/dev/null 2>&1 || true
 adb shell settings put secure lock_screen_lock_after_timeout 2147483647 >/dev/null 2>&1 || true
 adb shell svc power stayon usb >/dev/null 2>&1 || true
+log "security: lock mitigation applied (screen_off_timeout=max, lock_after_timeout=max, stayon usb)"
 
 enroll_fingerprint() {
+  # Best-effort Settings-driven enrollment; every step logged. The
+  # emulator's virtual sensor is driven with `adb emu finger touch`.
+  log "security: attempting fingerprint enrollment via Settings"
   adb shell am start -a android.settings.SECURITY_SETTINGS >/dev/null 2>&1 || true
   sleep 3
-  local f="$TMPD/fp.xml" i t
+  local f="$TMPD/fp.xml" i
   for i in 1 2 3 4 5 6; do
     dump_ui "$f" || return 1
     if grep -q "Fingerprint" "$f"; then
@@ -221,20 +332,24 @@ enroll_fingerprint() {
     sleep 1
   done
   dump_ui "$f" || return 1
+  # PIN gate before enrollment
   if grep -q "PIN\|password" "$f" && ! grep -q "Fingerprint" "$f"; then
     adb shell input text "$DEVICE_PIN" >/dev/null 2>&1 || true
     adb shell input keyevent 66 >/dev/null 2>&1 || true
     sleep 2
     dump_ui "$f" || return 1
   fi
+  # "Add a fingerprint" / enroll entry
   if grep -q "Add a fingerprint\|Fingerprint Unlock\|fingerprint" "$f"; then
     tap_text "$f" "Add a fingerprint" || tap_text "$f" "Fingerprint" || true
     sleep 2
   fi
-  for t in $(seq 1 12); do
+  # Sensor-touch phase: the enroll screen asks for repeated touches
+  local t
+  for t in 1 2 3 4 5 6 7 8 9 10 11 12; do
     adb emu finger touch 1 >/dev/null 2>&1 || true
     sleep 1
-    if dump_ui "$f" && grep -q "Fingerprint added\|Done" "$f"; then
+    if dump_ui "$f" && grep -q "Fingerprint added\|Done\|fingerprint.*added" "$f"; then
       tap_text "$f" "Done" || true
       return 0
     fi
@@ -242,38 +357,79 @@ enroll_fingerprint() {
   dump_ui "$f" || true
   grep -q "Fingerprint added" "$f" 2>/dev/null
 }
-if enroll_fingerprint; then log "security: fingerprint enrolled"; else log "security: fingerprint ENROLLMENT FAILED (PIN path still exercised)"; fi
-adb shell input keyevent 3 >/dev/null 2>&1 || true
+if enroll_fingerprint; then
+  lock_fp="enrolled (emulator virtual sensor, id 1)"
+else
+  lock_fp="ENROLLMENT FAILED (see lane log + fp dumps; PIN-secured path still exercised)"
+fi
+log "security: lock_fp=$lock_fp"
+adb shell input keyevent 3 >/dev/null 2>&1 || true  # HOME
 sleep 1
 
-# --- installs + mock Authenticate ------------------------------------------------
+# --- installs + Authenticate -----------------------------------------------------
+# Wallet-suite order (verify-v104 §2.2 step 5): mock install, then
+# Authenticate, then the APK under test — the 15-minute auth window
+# opens as late as the proven lane opens it.
 if [ -z "$VR_APK" ] || [ -z "$MOCK_APK" ] || [ -z "$GATE_HANDLE" ]; then
   log "config: VR_APK/MOCK_APK/GATE_HANDLE are all required"
   echo "gate_verdict=CONFIG-FAIL" > "$OUT/verdict-gate.txt"
   exit 1
 fi
-log "install: mock wallet + VR APK under test"
+log "install: mock wallet ($MOCK_APK)"
 adb install "$MOCK_APK" > "$TMPD/install-mock.log" 2>&1 || { log "install: MOCK INSTALL FAILED"; echo "gate_verdict=FAIL" > "$OUT/verdict-gate.txt"; exit 1; }
-adb uninstall "$PKG" >/dev/null 2>&1 || true
-adb install "$VR_APK" > "$TMPD/install-vr.log" 2>&1 || { log "install: VR INSTALL FAILED"; echo "gate_verdict=FAIL" > "$OUT/verdict-gate.txt"; exit 1; }
 
 authenticate_mock() {
+  log "auth: opening mock wallet to Authenticate (15-min window)"
   ensure_unlocked
   adb shell am start -W -n "$MOCK_ACT" >/dev/null 2>&1 || true
-  local f="$OUT/hier-mock-main.xml"
-  if wait_for "AUTHENTICATE|Authenticate" 30 "$f"; then
-    tap_text "$f" "AUTHENTICATE" || tap_text "$f" "Authenticate" || return 1
-    satisfy_auth_prompt
-    return $?
+  sleep 3
+  local f="$TMPD/mock-main.xml"
+  dump_ui "$f" || return 1
+  if ! grep -q "AUTHENTICATE\|Authenticate" "$f" && looks_locked "$f"; then
+    # r7: the launch can land behind an engaged keyguard (v105 r1) —
+    # the first dump then shows the lock screen, not the mock. Unlock
+    # and relaunch once before concluding the button is absent.
+    log "auth: mock launch landed behind the keyguard — unlocking + relaunching"
+    ensure_unlocked
+    adb shell am start -W -n "$MOCK_ACT" >/dev/null 2>&1 || true
+    sleep 3
+    dump_ui "$f" || return 1
   fi
+  grep -oE 'text="[^"]+"' "$f" | sort -u | head -12 | tee -a "$LANE_LOG" || true
+  # The button's dump text is 'AUTHENTICATE' (Material all-caps) — r3
+  # searched for 'Authenticate' and missed a healthy mock main screen
+  # that showed Name/Address/AUTHENTICATE exactly as configured.
+  if grep -q "AUTHENTICATE\|Authenticate" "$f"; then
+    tap_exact "$f" "AUTHENTICATE" || tap_exact "$f" "Authenticate" || tap_text "$f" "UTHENTICATE" || return 1
+    if satisfy_auth_prompt; then
+      date +%s > "$AUTH_EPOCH_FILE"
+      auth_note="authenticated (window opened $(date -u +%H:%M:%S)Z)"
+      log "auth: $auth_note"
+      sleep 1
+      dump_ui "$OUT/mock-after-auth.xml" || true
+      snap "mock-after-auth.png"
+      return 0
+    fi
+    auth_note="AUTHENTICATE PROMPT NOT SATISFIED"
+    log "auth: $auth_note"
+    return 1
+  fi
+  auth_note="Authenticate button not found on mock main screen"
+  log "auth: $auth_note"
   return 1
 }
 if authenticate_mock; then log "auth: mock authenticated (15-min window)"; else log "auth: mock AUTHENTICATE FAILED"; fi
-adb shell input keyevent 3 >/dev/null 2>&1 || true
+adb shell input keyevent 3 >/dev/null 2>&1 || true  # HOME
+
+log "install: VR APK under test ($VR_APK)"
+adb uninstall "$PKG" >/dev/null 2>&1 || true
+adb install "$VR_APK" > "$TMPD/install-vr.log" 2>&1 || { log "install: VR INSTALL FAILED"; echo "gate_verdict=FAIL" > "$OUT/verdict-gate.txt"; exit 1; }
+adb logcat -c >/dev/null 2>&1 || true
 
 # --- gate navigation ---------------------------------------------------------------
 launch_to_gate() { # $1 = rep tag
   local tag="$1"
+  ensure_unlocked
   adb shell am force-stop "$PKG" >/dev/null 2>&1 || true
   sleep 1
   adb shell am start -W -n "$ACT" >/dev/null 2>&1 || true

@@ -48,6 +48,30 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Enable KVM group permissions
+      shell: bash
+      run: |
+        # VERBATIM from the wallet-suite action (the pool's proven
+        # lane). Its absence here was the gate rig's root defect:
+        # without it the emulator-runner action finds /dev/kvm
+        # unusable and launches with '-accel off' (run 41396257103:
+        # 'ProbeKVM: This user doesn't have permissions to use KVM',
+        # boot 801 s, uiautomator channel dead from the first dump,
+        # installs failing — 7 executions, R-1/R-2 NOT-RUN (rig)).
+        echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+        sudo udevadm control --reload-rules
+        sudo udevadm trigger --name-match=kvm
+        ls -la /dev/kvm
+    - name: Install emulator runtime libraries
+      shell: bash
+      run: |
+        # VERBATIM from the wallet-suite action: emulator 37.2.13's
+        # qemu links libpulse.so.0, which some ubuntu-latest draws
+        # lack — the process dies at load and the action burns its
+        # whole boot timeout. Install up front.
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq libpulse0 libgl1 libegl1 libnss3 libxcb-cursor0 > /dev/null
+        ldconfig -p | grep -c libpulse || true
     - name: Resolve Mock MWA Wallet ref (pinned in-repo)
       id: mockref
       shell: bash
@@ -232,11 +256,26 @@ runs:
         cat > "${RUNNER_TEMP}/gate-run.sh" <<'WRAP'
         #!/usr/bin/env bash
         # Runs INSIDE the emulator-runner step, device up. Performs the
-        # trust-store + hosts surgery, restarts the framework so new
-        # processes pick up the store, then execs the gate driver.
+        # trust-store + hosts surgery (NO framework restart — see the
+        # note below), waits for the framework to settle after
+        # 'adb root', then execs the gate driver.
         set -x
         adb root || true
         adb wait-for-device
+        # Settle wait (re-host, 2026-11-01): 'adb root' restarts adbd
+        # and the device drops offline briefly; the wallet-suite never
+        # roots, so it never races this. Do not touch the device until
+        # boot is complete AND the lock-settings service answers —
+        # the gate driver's first act (locksettings set-pin) and its
+        # uiautomator channel both depend on a settled framework.
+        for i in $(seq 1 40); do
+          bc="$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')"
+          if [ "$bc" = "1" ] && adb shell service check lock_settings 2>/dev/null | grep -q "found"; then
+            echo "WRAPPER_SETTLED after $i polls"
+            break
+          fi
+          sleep 3
+        done
         HASH="$(openssl x509 -subject_hash_old -in "$GATE_CA_CRT" | sed -n '1p')"
         adb shell 'rm -rf /data/local/tmp/vr-cacerts; mkdir -p /data/local/tmp/vr-cacerts; cp /apex/com.android.conscrypt/cacerts/* /data/local/tmp/vr-cacerts/ 2>/dev/null; cp /system/etc/security/cacerts/* /data/local/tmp/vr-cacerts/ 2>/dev/null; ls /data/local/tmp/vr-cacerts | wc -l'
         adb push "$GATE_CA_CRT" "/data/local/tmp/vr-cacerts/${HASH}.0"
@@ -286,7 +325,7 @@ runs:
         force-avd-creation: true
         emulator-boot-timeout: 1200
         ram-size: 8192
-        emulator-options: -no-window -gpu swiftshader_indirect -memory 8192 -noaudio -no-boot-anim -camera-back none -camera-front none -no-snapshot-save
+        emulator-options: -no-window -gpu swiftshader_indirect -memory 8192 -no-boot-anim -camera-back none -camera-front none
         disable-animations: true
         script: ${{ runner.temp }}/gate-run.sh
     - name: Staging server — janitor sweep + collect staging evidence
