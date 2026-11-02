@@ -86,7 +86,12 @@ runs:
           | base64 --decode \
           > "${RUNNER_TEMP}/mockwallet-src/app/src/main/res/raw/private_key"
         cd "${RUNNER_TEMP}/mockwallet-src"
-        gradle :app:assembleDebug --stacktrace
+        # Build with the mock repo's own wrapper (the wallet-suite
+        # recipe): the pinned system Gradle 8.11.1 cannot apply the
+        # mock's AGP 8.13.0 — gate-r1 run 41374411883 died on exactly
+        # that; the wrapper carries the compatible distribution.
+        chmod +x gradlew
+        ./gradlew :app:assembleDebug --console=plain --no-daemon
         MOCK_APK="$(find "${RUNNER_TEMP}/mockwallet-src/app/build/outputs/apk" -name '*.apk' | head -n 1)"
         echo "MOCK_APK=$MOCK_APK" >> "$GITHUB_ENV"
         echo "Mock wallet built: $MOCK_APK"
