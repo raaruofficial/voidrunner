@@ -1,0 +1,8 @@
+// VOIDRUNNER FTL gate test — standalone instrumentation project.
+// Deliberately NOT part of the app build: it produces the test APK
+// that Firebase Test Lab (and the CI validation job) installs next to
+// the app under test + the Mock MWA Wallet (--additional-apks).
+// Build recipe lives in .github/workflows/ftl-gate-validate.yml
+// (system Gradle 8.13.x + JDK 17; no wrapper jar is committed).
+rootProject.name = 'vr-ftl-gate-test'
+include ':app'

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Test-APK manifest: the instrumentation targets the APP UNDER
+     TEST's package (com.voidrunner.app) — the canonical layout FTL
+     expects for an instrumentation matrix — while the driver itself
+     works at OS level via UiDevice and crosses into the Mock wallet
+     and the system auth prompt. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <instrumentation
+        android:name="androidx.test.runner.AndroidJUnitRunner"
+        android:targetPackage="com.voidrunner.app"
+        android:label="VOIDRUNNER R-1 gate flow (FTL)" />
+    <application>
+        <uses-library android:name="android.test.runner" />
+    </application>
+</manifest>

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Stub main manifest. The instrumentation declaration lives in
+     src/androidTest/AndroidManifest.xml (canonical for test APKs). -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application
+        android:label="VR Gate Test (stub)"
+        android:theme="@android:style/Theme.NoDisplay" />
+</manifest>

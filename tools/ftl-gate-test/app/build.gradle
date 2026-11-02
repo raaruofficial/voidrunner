@@ -1,0 +1,40 @@
+// VOIDRUNNER FTL gate test — the deliverable of this module is the
+// androidTest APK (assembleDebugAndroidTest): an AndroidX/UIAutomator
+// suite that drives the R-1 gate flow across THREE installed apps
+// (the staging shell under test, the Mock MWA Wallet, the system).
+// The main APK is an inert stub; nothing here ships to any store.
+apply plugin: 'com.android.application'
+
+android {
+    namespace 'com.voidrunner.gatetest'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'com.voidrunner.gatetest'
+        minSdk 28
+        targetSdk 35
+        versionCode 1
+        versionName '1.0'
+        testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
+    }
+
+    buildTypes {
+        debug {
+            // The test APK and the stub share the debug key, exactly
+            // what a test instrument needs. The app under test is a
+            // separate APK (staging shell) installed alongside.
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    testImplementation 'junit:junit:4.13.2'
+    androidTestImplementation 'androidx.test.ext:junit:1.2.1'
+    androidTestImplementation 'androidx.test:runner:1.6.2'
+    androidTestImplementation 'androidx.test.uiautomator:uiautomator:2.3.0'
+}

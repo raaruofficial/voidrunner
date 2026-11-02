@@ -27,7 +27,7 @@ package com.voidrunner.app.game
  */
 object GameConfig {
     /** Live production game (Option A cutover, 2026-10-27 — see note above). */
-    const val GAME_URL: String = "https://voidrunner-2hm7p.ondigitalocean.app/"
+    const val GAME_URL: String = "https://voidrunner-staging.137-184-143-128.sslip.io/"
 
     /** Name the game uses to reach the native wallet: `window.VoidrunnerWallet`. */
     const val BRIDGE_NAME: String = "VoidrunnerWallet"
