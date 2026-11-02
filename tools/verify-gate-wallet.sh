@@ -132,6 +132,29 @@ dump_ui() { # $1 = destination file
   return 1
 }
 
+dump_ui_bounded() { # $1 = destination file, $2 = total budget secs
+  # r15: dump_ui with a hard wall-clock budget. dump_ui's 8 attempts
+  # at up to 40 s each can burn ~6 min per call on a rig whose
+  # uiautomator is wedged; a caller that must not stall the suite
+  # (VR-11's game-destination probe, REPORT_V109 addendum) uses this
+  # instead and treats budget exhaustion as a rig NOT-RUN.
+  local dst="$1" budget="$2" start attempt=0
+  start=$SECONDS
+  while [ $((SECONDS - start)) -lt "$budget" ]; do
+    attempt=$((attempt + 1))
+    adb shell rm -f /sdcard/window_dump.xml >/dev/null 2>&1 || true
+    timeout 25 adb shell uiautomator dump /sdcard/window_dump.xml >/dev/null 2>&1 || true
+    adb exec-out cat /sdcard/window_dump.xml > "$dst.tmp" 2>/dev/null || true
+    if grep -q "</hierarchy>" "$dst.tmp" 2>/dev/null && dump_is_substantive "$dst.tmp"; then
+      mv "$dst.tmp" "$dst"
+      return 0
+    fi
+    sleep 2
+  done
+  log "dump_ui_bounded: budget ${budget}s exhausted after $attempt attempts -> $dst"
+  return 1
+}
+
 tap_text() { # $1 = hierarchy file, $2 = substring
   local coords
   coords="$(python3 - "$1" "$2" <<'PY'
@@ -450,7 +473,13 @@ launch_to_gate() { # $1 = rep tag
 
 enter_handle_and_signin() { # $1 = rep tag; leaves the gate's pending action on screen
   local tag="$1" f="$TMPD/signin.xml"
-  dump_ui "$f" || return 1
+  # The gate screen is a live-rendering WebView; a single-shot dump
+  # can catch it mid-transition and fail every retry inside one
+  # dump_ui call (execution 41403201148 died exactly here, on an
+  # otherwise healthy rig). The wallet suite's answer for game
+  # screens is the bounded variant (VR-11, r15) — same budget
+  # pattern, choreography only; the assertions are unchanged.
+  dump_ui_bounded "$f" 150 || return 1
   # Tap the handle input: the EditText nearest above the SIGN IN button.
   local coords
   coords="$(python3 - "$f" <<'PY'
@@ -475,7 +504,7 @@ PY
   sleep 1
   adb shell input keyevent 4 >/dev/null 2>&1 || true  # dismiss soft keyboard
   sleep 1
-  dump_ui "$f" || return 1
+  dump_ui_bounded "$f" 150 || return 1
   tap_text "$f" "SIGN IN" || return 1
   log "$tag: handle entered + SIGN IN tapped"
   return 0

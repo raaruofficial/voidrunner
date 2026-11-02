@@ -3,8 +3,8 @@ description: >
   The §2 gate cell: builds the pinned Mock MWA Wallet, hash-gates the
   APK under test, starts the serving rig (candidate static bytes at
   the production hostname via a run-local CA; everything else proxied
-  to the upstream origin), performs the trust-store + hosts
-  surgery on a PIN-locked API 36 AVD, and runs
+  to the upstream origin), performs the trust-store surgery +
+  emulator-DNS redirection on a PIN-locked API 36 AVD, and runs
   tools/verify-gate-wallet.sh. The APK run/artefact come from the
   FUN001_APK_RUN_ID / FUN001_APK_ARTIFACT env (workflow pins); the
   hash gate uses the caller job's EXPECTED_SHA256 / VERSION_STAMP env.
@@ -246,7 +246,32 @@ runs:
           --serve "${{ inputs.serve-dir }}" \
           --upstream "$RIG_UPSTREAM" --port 443 \
           > "$RIG_DIR/rig.log" 2>&1 &
+        # Gate DNS responder (ADDENDUM #2 execution 2): the hosts
+        # bind-mount never redirected the device (netd reads the
+        # hosts file at its own start; every gate execution printed
+        # 'ping: unknown host' and the device loaded the LIVE bytes
+        # via public DNS instead). The emulator's supported
+        # redirection point is -dns-server (set on the emulator step
+        # below): the guest asks 10.0.2.2, this responder answers
+        # the production hostname with 10.0.2.2 (the rig) and
+        # forwards everything else to the runner's upstream.
+        sudo nohup python3 tools/gate-dns.py --name "$HOST" --bind 127.0.0.1 \
+          > "$RIG_DIR/dns.log" 2>&1 &
         sleep 2
+        head -n 2 "$RIG_DIR/dns.log" || true
+        python3 - "$HOST" <<'PY' || echo "gate-dns self-check FAILED (see dns log in evidence)"
+        import socket, struct, sys
+        name = sys.argv[1]
+        q = b"".join(bytes([len(p)]) + p.encode() for p in name.split(".")) + b"\x00"
+        pkt = struct.pack(">HHHHHH", 0x4744, 0x0100, 1, 0, 0, 0) + q + struct.pack(">HH", 1, 1)
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(4)
+        s.sendto(pkt, ("127.0.0.1", 53))
+        resp, _ = s.recvfrom(4096)
+        an = struct.unpack(">H", resp[6:8])[0]
+        print(f"gate-dns self-check: answers={an} rdata_tail={resp[-4:]!r}")
+        assert an >= 1 and resp[-4:] == socket.inet_aton("10.0.2.2"), "fixture answer wrong"
+        print("gate-dns self-check PASS: production hostname -> 10.0.2.2")
+        PY
         head -n 2 "$RIG_DIR/rig.log" || true
         curl -sk --cacert "$RIG_DIR/ca.crt" "https://$HOST:443/" --resolve "$HOST:443:127.0.0.1" \
           -o /dev/null -w 'rig self-check: HTTP %{http_code}\n' || echo "rig self-check FAILED (see rig log in evidence)"
@@ -256,7 +281,7 @@ runs:
         cat > "${RUNNER_TEMP}/gate-run.sh" <<'WRAP'
         #!/usr/bin/env bash
         # Runs INSIDE the emulator-runner step, device up. Performs the
-        # trust-store + hosts surgery (NO framework restart — see the
+        # trust-store surgery (NO framework restart — see the
         # note below), waits for the framework to settle after
         # 'adb root', then execs the gate driver.
         set -x
@@ -281,7 +306,15 @@ runs:
         adb push "$GATE_CA_CRT" "/data/local/tmp/vr-cacerts/${HASH}.0"
         adb shell 'mount -o bind /data/local/tmp/vr-cacerts /apex/com.android.conscrypt/cacerts' || echo "CA_MOUNT_APEX_FAILED"
         adb shell 'mount -o bind /data/local/tmp/vr-cacerts /system/etc/security/cacerts' || echo "CA_MOUNT_SYSTEM_FAILED"
-        adb shell 'cp /system/etc/hosts /data/local/tmp/vr-hosts && echo "10.0.2.2 voidrunner-2hm7p.ondigitalocean.app" >> /data/local/tmp/vr-hosts && mount -o bind /data/local/tmp/vr-hosts /system/etc/hosts' || echo "HOSTS_MOUNT_FAILED"
+        # NO hosts bind-mount (removed, ADDENDUM #2 execution 2): it
+        # never took effect for the device resolver in any gate
+        # execution — netd reads /system/etc/hosts at its own start,
+        # before the wrapper runs — and the device silently used
+        # public DNS and loaded the live production bytes instead of
+        # the rig's. Hostname redirection now happens at the
+        # emulator's DNS (-dns-server 10.0.2.2 + tools/gate-dns.py).
+        # The ping below stays as the diagnostic: with DNS
+        # redirection it must resolve to 10.0.2.2 and answer.
         # NO framework restart. The wrapper previously ran
         # 'adb shell stop; adb shell start' so the framework would
         # re-read the bind-mounted CA store — and that restart is
@@ -325,7 +358,7 @@ runs:
         force-avd-creation: true
         emulator-boot-timeout: 1200
         ram-size: 8192
-        emulator-options: -no-window -gpu swiftshader_indirect -memory 8192 -no-boot-anim -camera-back none -camera-front none
+        emulator-options: -no-window -gpu swiftshader_indirect -memory 8192 -no-boot-anim -camera-back none -camera-front none -dns-server 10.0.2.2
         disable-animations: true
         script: ${{ runner.temp }}/gate-run.sh
     - name: Staging server — janitor sweep + collect staging evidence
@@ -349,4 +382,5 @@ runs:
         path: |
           gate-evidence/**
           ${{ runner.temp }}/rig/rig.log
+          ${{ runner.temp }}/rig/dns.log
         retention-days: 90
