@@ -17,10 +17,11 @@ forwards, it never stubs.
 
 The runner presents a leaf certificate for the production hostname
 signed by a run-local CA; the gate-suite action installs that CA
-into the emulator's system trust store and bind-mounts a hosts file
-pointing the hostname at the runner (10.0.2.2). Every request is
-logged (path + served-from) so the evidence shows which bytes the
-device actually received.
+into the emulator's system trust store, and the production hostname
+is redirected to the runner at the emulator's DNS (tools/gate-dns.py
+answers it with 10.0.2.2, the guest-side alias of the host). Every
+request is logged (path + served-from) so the evidence shows which
+bytes the device actually received.
 
 Usage:
   gate-rig.py --cert leaf.pem --key leaf.key --serve <public-dir>

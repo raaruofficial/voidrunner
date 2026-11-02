@@ -246,16 +246,27 @@ runs:
           --serve "${{ inputs.serve-dir }}" \
           --upstream "$RIG_UPSTREAM" --port 443 \
           > "$RIG_DIR/rig.log" 2>&1 &
-        # Gate DNS responder (ADDENDUM #2 execution 2): the hosts
-        # bind-mount never redirected the device (netd reads the
-        # hosts file at its own start; every gate execution printed
-        # 'ping: unknown host' and the device loaded the LIVE bytes
-        # via public DNS instead). The emulator's supported
-        # redirection point is -dns-server (set on the emulator step
-        # below): the guest asks 10.0.2.2, this responder answers
-        # the production hostname with 10.0.2.2 (the rig) and
-        # forwards everything else to the runner's upstream.
-        sudo nohup python3 tools/gate-dns.py --name "$HOST" --bind 127.0.0.1 \
+        # Gate DNS responder (ADDENDUM #2 execution 2; bind +
+        # server-list cure ADDENDUM #3): the hosts bind-mount never
+        # redirected the device (netd reads the hosts file at its
+        # own start; every gate execution printed 'ping: unknown
+        # host' and the device loaded the LIVE bytes via public DNS
+        # instead). Execution 2 pointed the emulator's DNS at this
+        # responder via '-dns-server 10.0.2.2' with the responder on
+        # 127.0.0.1 — and no device query ever arrived (WebView:
+        # ERR_NAME_NOT_RESOLVED): '10.0.2.2' is the GUEST-side alias
+        # of the host loopback, not a host address, so as a proxy
+        # upstream in the host namespace it routes nowhere; and if
+        # slirp delivers the guest's UDP/53 to a non-loopback host
+        # interface, a loopback-only bind cannot hear it either.
+        # The cure (emulator step below + this bind): the server
+        # list leads with the runner's own loopback AND keeps
+        # 10.0.2.2, and the responder binds 0.0.0.0 so whichever
+        # host interface carries the device query, it is answered.
+        # The responder answers the production hostname with
+        # 10.0.2.2 (the guest-side route to the rig) and forwards
+        # everything else to the runner's upstream.
+        sudo nohup python3 tools/gate-dns.py --name "$HOST" --bind 0.0.0.0 \
           > "$RIG_DIR/dns.log" 2>&1 &
         sleep 2
         head -n 2 "$RIG_DIR/dns.log" || true
@@ -311,10 +322,13 @@ runs:
         # execution — netd reads /system/etc/hosts at its own start,
         # before the wrapper runs — and the device silently used
         # public DNS and loaded the live production bytes instead of
-        # the rig's. Hostname redirection now happens at the
-        # emulator's DNS (-dns-server 10.0.2.2 + tools/gate-dns.py).
-        # The ping below stays as the diagnostic: with DNS
-        # redirection it must resolve to 10.0.2.2 and answer.
+        # the rig's. Hostname redirection happens at the emulator's
+        # DNS (-dns-server 127.0.0.1,10.0.2.2 + tools/gate-dns.py on
+        # 0.0.0.0; ADDENDUM #3 — execution 2's '-dns-server 10.0.2.2'
+        # with a loopback-bound responder never received a device
+        # query). The ping below stays as the diagnostic: with DNS
+        # redirection its resolution line must show 10.0.2.2 (the
+        # responder's answer), not 'unknown host'.
         # NO framework restart. The wrapper previously ran
         # 'adb shell stop; adb shell start' so the framework would
         # re-read the bind-mounted CA store — and that restart is
@@ -358,7 +372,7 @@ runs:
         force-avd-creation: true
         emulator-boot-timeout: 1200
         ram-size: 8192
-        emulator-options: -no-window -gpu swiftshader_indirect -memory 8192 -no-boot-anim -camera-back none -camera-front none -dns-server 10.0.2.2
+        emulator-options: -no-window -gpu swiftshader_indirect -memory 8192 -no-boot-anim -camera-back none -camera-front none -dns-server 127.0.0.1,10.0.2.2
         disable-animations: true
         script: ${{ runner.temp }}/gate-run.sh
     - name: Staging server — janitor sweep + collect staging evidence
