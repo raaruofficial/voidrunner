@@ -301,10 +301,16 @@ if ets:
     print(f"{(int(m.group(1)) + int(m.group(3))) // 2} {(int(m.group(2)) + int(m.group(4))) // 2}")
 PY
 )"
-  if [ -z "$coords" ]; then log "$tag: handle EditText not found"; return 1; fi
-  adb shell input tap $coords
+  if [ -n "$coords" ]; then
+    adb shell input tap $coords
+  elif ! tap_text "$f" ".skr"; then
+    log "$tag: handle EditText not found and no .skr suffix to focus"
+    return 1
+  fi
   sleep 1
   adb shell input text "$HANDLE_LOCAL" >/dev/null 2>&1 || true
+  sleep 1
+  adb shell input keyevent 4 >/dev/null 2>&1 || true  # dismiss soft keyboard
   sleep 1
   dump_ui "$f" || return 1
   tap_text "$f" "SIGN IN" || return 1
@@ -329,6 +335,12 @@ run_wallet_action() { # $1 = rep tag, $2 = budget secs
       cp "$f" "$OUT/hier-$tag-failcopy.xml"; snap "shot-$tag-failcopy.png"
       log "$tag: FAILURE COPY observed: $REP_FAILCOPY"
       return 0
+    fi
+    # Mock re-auth prompt up instead of a sheet (15-min window lapsed)?
+    if [ "$(fg_pkg)" = "$MOCK" ] && grep -q "Log in to" "$f"; then
+      log "$tag: mock re-auth prompt — satisfying"
+      satisfy_auth_prompt || true
+      continue
     fi
     # Wallet sheet up? (mock foreground + sheet controls)
     if [ "$(fg_pkg)" = "$MOCK" ] && grep -qE 'text="(Approve|Sign|Connect|Cancel)"' "$f"; then
