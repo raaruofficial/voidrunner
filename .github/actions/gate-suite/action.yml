@@ -1,0 +1,400 @@
+name: VOIDRUNNER gate suite (v1.0.13 cure R-1/R-2)
+description: >
+  The §2 gate cell: builds the pinned Mock MWA Wallet, hash-gates the
+  APK under test, starts the serving rig (candidate static bytes at
+  the production hostname via a run-local CA; everything else proxied
+  to the upstream origin), performs the trust-store surgery +
+  emulator-DNS redirection on a PIN-locked API 36 AVD, and runs
+  tools/verify-gate-wallet.sh. The APK run/artefact come from the
+  FUN001_APK_RUN_ID / FUN001_APK_ARTIFACT env (workflow pins); the
+  hash gate uses the caller job's EXPECTED_SHA256 / VERSION_STAMP env.
+  server-mode selects the upstream: "production" (the real origin) or
+  "staging" — the R-1/R-2 COMPOSITION of the owner's 2026-11-01
+  ruling: the production server bundle running on the runner with
+  the ANS registry seam stubbed for the one fixture handle
+  (tools/gate-staging/), because no .skr fixture can exist for a
+  test wallet under Solana Mobile's documented minting rules.
+inputs:
+  api-level:
+    description: Android API level for the AVD
+    required: false
+    default: "36"
+  avd-name:
+    description: AVD name
+    required: true
+  mock-private-key:
+    description: Mock wallet throwaway private key (repo secret)
+    required: true
+  gate-mode:
+    description: "r1 (cured candidate, bind+proof reps) or r2 (negative control)"
+    required: true
+  serve-dir:
+    description: Repo-relative dir whose bytes the rig serves as the client
+    required: true
+  served-asset:
+    description: JS asset filename the device must fetch through the rig
+    required: true
+  gate-handle:
+    description: Lane-designated fixture handle (full form, name.skr)
+    required: true
+  server-mode:
+    description: "production (real origin upstream) or staging (composition: production server bundle on the runner, registry seam stubbed for the fixture handle)"
+    required: false
+    default: "production"
+  fixture-owner:
+    description: Pubkey the staging registry seam names as the fixture handle's owner (staging mode only; the Mock wallet key)
+    required: false
+    default: ""
+runs:
+  using: composite
+  steps:
+    - name: Enable KVM group permissions
+      shell: bash
+      run: |
+        # VERBATIM from the wallet-suite action (the pool's proven
+        # lane). Its absence here was the gate rig's root defect:
+        # without it the emulator-runner action finds /dev/kvm
+        # unusable and launches with '-accel off' (run 41396257103:
+        # 'ProbeKVM: This user doesn't have permissions to use KVM',
+        # boot 801 s, uiautomator channel dead from the first dump,
+        # installs failing — 7 executions, R-1/R-2 NOT-RUN (rig)).
+        echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+        sudo udevadm control --reload-rules
+        sudo udevadm trigger --name-match=kvm
+        ls -la /dev/kvm
+    - name: Install emulator runtime libraries
+      shell: bash
+      run: |
+        # VERBATIM from the wallet-suite action: emulator 37.2.13's
+        # qemu links libpulse.so.0, which some ubuntu-latest draws
+        # lack — the process dies at load and the action burns its
+        # whole boot timeout. Install up front.
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq libpulse0 libgl1 libegl1 libnss3 libxcb-cursor0 > /dev/null
+        ldconfig -p | grep -c libpulse || true
+    - name: Resolve Mock MWA Wallet ref (pinned in-repo)
+      id: mockref
+      shell: bash
+      run: |
+        REF="$(tr -d '[:space:]' < tools/mockwallet-ref.txt)"
+        echo "ref=$REF" >> "$GITHUB_OUTPUT"
+        echo "Mock MWA Wallet ref: $REF"
+    - name: Cache Mock MWA Wallet checkout
+      id: mockcache
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}/mockwallet-src
+        key: mockwallet-${{ steps.mockref.outputs.ref }}-v2
+    - name: Check out Mock MWA Wallet (pinned)
+      if: steps.mockcache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        git clone https://github.com/solana-mobile/mock-mwa-wallet.git "${RUNNER_TEMP}/mockwallet-src"
+        git -C "${RUNNER_TEMP}/mockwallet-src" checkout "${{ steps.mockref.outputs.ref }}"
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: "17"
+    - name: Set up Gradle
+      uses: gradle/actions/setup-gradle@v4
+      with:
+        gradle-version: "8.11.1"
+    - name: Configure mock wallet key + build Mock MWA Wallet
+      shell: bash
+      env:
+        MOCK_WALLET_PRIVATE_KEY: ${{ inputs.mock-private-key }}
+      run: |
+        # The wallet-suite's proven recipe, verbatim in substance:
+        # the mock reads its fixed key from local.properties (the
+        # documented configuration — mock-mwa-wallet README) and is
+        # built with its own gradlew. Two earlier gate-r1 dispatches
+        # died on this step's inventions (41374411883: system Gradle
+        # 8.11.1 vs the mock's AGP 8.13.0; 41375464775: no
+        # local.properties for build.gradle to read).
+        cd "${RUNNER_TEMP}/mockwallet-src"
+        {
+          printf 'privateKey=%s\n' "$MOCK_WALLET_PRIVATE_KEY"
+          printf 'walletName=%s\n' "VRTestWallet"
+          printf 'sdk.dir=%s\n' "$ANDROID_HOME"
+        } > local.properties
+        chmod +x gradlew
+        ./gradlew :app:assembleDebug --console=plain --no-daemon
+        MOCK_APK="$(find "${RUNNER_TEMP}/mockwallet-src/app/build/outputs/apk" -name '*.apk' | head -n 1)"
+        echo "MOCK_APK=$MOCK_APK" >> "$GITHUB_ENV"
+        echo "Mock wallet built: $MOCK_APK"
+    - name: Download sealed APK artefact + verify its sha256
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        echo "Hash gate: run=${FUN001_APK_RUN_ID} artefact=${FUN001_APK_ARTIFACT} stamp=${VERSION_STAMP}"
+        mkdir -p "${RUNNER_TEMP}/vr-apk"
+        gh run download "${FUN001_APK_RUN_ID}" --name "${FUN001_APK_ARTIFACT}" --dir "${RUNNER_TEMP}/vr-apk"
+        VR_APK="$(find "${RUNNER_TEMP}/vr-apk" -name '*.apk' | head -n 1)"
+        echo "Downloaded: $VR_APK"
+        ACTUAL="$(sha256sum "$VR_APK" | cut -d' ' -f1)"
+        echo "sha256: $ACTUAL (expected ${EXPECTED_SHA256})"
+        if [ "$ACTUAL" != "${EXPECTED_SHA256}" ]; then
+          echo "::error::APK hash mismatch — refusing to test an unsealed binary"
+          exit 1
+        fi
+        echo "VR_APK=$VR_APK" >> "$GITHUB_ENV"
+    - name: Resolve gate origins (server-mode)
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ "${{ inputs.server-mode }}" = "staging" ]; then
+          echo "GATE_ORIGIN=http://127.0.0.1:8791" >> "$GITHUB_ENV"
+          echo "RIG_UPSTREAM=http://127.0.0.1:8791" >> "$GITHUB_ENV"
+          echo "server-mode=staging (composition): read-backs + rig proxy target the on-runner staging server"
+        else
+          echo "GATE_ORIGIN=https://voidrunner-2hm7p.ondigitalocean.app" >> "$GITHUB_ENV"
+          echo "RIG_UPSTREAM=https://voidrunner-2hm7p.ondigitalocean.app" >> "$GITHUB_ENV"
+          echo "server-mode=production: read-backs + rig proxy target the real origin"
+        fi
+    - name: Set up Bun (staging server runtime)
+      if: inputs.server-mode == 'staging'
+      uses: oven-sh/setup-bun@v2
+      with:
+        bun-version: "1.3.10"
+    - name: Staging server — fetch the production bundle + build the seamed module
+      if: inputs.server-mode == 'staging'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        mkdir -p "${RUNNER_TEMP}/staging"
+        # The production server bundle is a RELEASE ASSET, never a git
+        # blob: it carries server-only config, and GitHub push
+        # protection (correctly) refuses it in history. apply-seam.py
+        # hash-gates it against the bundle of record before use.
+        gh release download gate-staging-fixtures-v1 \
+          --pattern "server-actions.production.js" \
+          --dir "${RUNNER_TEMP}/staging"
+        echo "GATE_BUNDLE_PATH=${RUNNER_TEMP}/staging/server-actions.production.js" >> "$GITHUB_ENV"
+        python3 tools/gate-staging/apply-seam.py \
+          "${RUNNER_TEMP}/staging/server-actions.production.js" \
+          "${RUNNER_TEMP}/staging/server-actions.staging.js" \
+          | tee "${RUNNER_TEMP}/staging/seam-record.txt"
+        echo "fixture handle: ${{ inputs.gate-handle }}" >> "${RUNNER_TEMP}/staging/seam-record.txt"
+        echo "fixture owner (registry seam): ${{ inputs.fixture-owner }}" >> "${RUNNER_TEMP}/staging/seam-record.txt"
+        cat "${RUNNER_TEMP}/staging/seam-record.txt"
+    - name: Staging server — janitor asserts a clean fixture slate
+      if: inputs.server-mode == 'staging'
+      shell: bash
+      env:
+        VR_GATE_FIXTURE_HANDLE: ${{ inputs.gate-handle }}
+      run: |
+        set -euo pipefail
+        bash tools/gate-staging/janitor.sh assert-clean "$GATE_BUNDLE_PATH"
+    - name: Staging server — start + health + runner-side smoke
+      if: inputs.server-mode == 'staging'
+      shell: bash
+      env:
+        VR_GATE_SERVER_MODULE: ${{ runner.temp }}/staging/server-actions.staging.js
+        VR_GATE_FIXTURE_HANDLE: ${{ inputs.gate-handle }}
+        VR_GATE_FIXTURE_OWNER: ${{ inputs.fixture-owner }}
+        VR_GATE_STAGING_PORT: "8791"
+      run: |
+        set -euo pipefail
+        nohup bun tools/gate-staging/staging-server.ts > "${RUNNER_TEMP}/staging/staging-server.log" 2>&1 &
+        for i in $(seq 1 30); do
+          if curl -s http://127.0.0.1:8791/health > "${RUNNER_TEMP}/staging/health.json" 2>/dev/null; then break; fi
+          sleep 2
+        done
+        cat "${RUNNER_TEMP}/staging/health.json"
+        grep -q '"ok":true' "${RUNNER_TEMP}/staging/health.json"
+        # Runner-side smoke: the fixture handle must answer bind_required
+        # with the seam's owner BEFORE any device time is spent.
+        curl -s -X POST http://127.0.0.1:8791/actions -H 'Content-Type: application/json' \
+          -d "{\"action\":\"signIn\",\"args\":{\"name\":\"${{ inputs.gate-handle }}\"},\"actionCallId\":\"staging-smoke\"}" \
+          > "${RUNNER_TEMP}/staging/staging-smoke.json"
+        cat "${RUNNER_TEMP}/staging/staging-smoke.json"
+        python3 - "${RUNNER_TEMP}/staging/staging-smoke.json" "${{ inputs.fixture-owner }}" <<'PY'
+        import json, sys
+        d = json.load(open(sys.argv[1]))
+        data = d.get("data") or {}
+        assert data.get("status") == "bind_required", f"smoke: expected bind_required, got {d}"
+        assert data.get("ownerPubkey") == sys.argv[2], f"smoke: seam owner mismatch: {d}"
+        print("staging smoke PASS: bind_required with the fixture owner")
+        PY
+    - name: Serving rig — CA, leaf cert, start
+      shell: bash
+      run: |
+        set -euo pipefail
+        HOST="voidrunner-2hm7p.ondigitalocean.app"
+        RIG_DIR="${RUNNER_TEMP}/rig"
+        mkdir -p "$RIG_DIR"
+        # Run-local CA (never leaves the runner; the emulator store copy
+        # dies with the AVD).
+        openssl req -x509 -newkey rsa:2048 -keyout "$RIG_DIR/ca.key" -out "$RIG_DIR/ca.crt" \
+          -days 2 -nodes -subj "/CN=VOIDRUNNER gate rig CA" 2>/dev/null
+        # Leaf for the production hostname, SAN-signed by the CA.
+        openssl req -newkey rsa:2048 -keyout "$RIG_DIR/leaf.key" -out "$RIG_DIR/leaf.csr" \
+          -nodes -subj "/CN=$HOST" 2>/dev/null
+        printf 'subjectAltName=DNS:%s\n' "$HOST" > "$RIG_DIR/san.cnf"
+        openssl x509 -req -in "$RIG_DIR/leaf.csr" -CA "$RIG_DIR/ca.crt" -CAkey "$RIG_DIR/ca.key" \
+          -CAcreateserial -out "$RIG_DIR/leaf.crt" -days 2 -extfile "$RIG_DIR/san.cnf" 2>/dev/null
+        cat "$RIG_DIR/leaf.crt" "$RIG_DIR/leaf.key" > "$RIG_DIR/leaf.pem"
+        echo "GATE_CA_CRT=$RIG_DIR/ca.crt" >> "$GITHUB_ENV"
+        echo "RIG_LOG=$RIG_DIR/rig.log" >> "$GITHUB_ENV"
+        sudo nohup python3 tools/gate-rig.py \
+          --cert "$RIG_DIR/leaf.pem" --key "$RIG_DIR/leaf.pem" \
+          --serve "${{ inputs.serve-dir }}" \
+          --upstream "$RIG_UPSTREAM" --port 443 \
+          > "$RIG_DIR/rig.log" 2>&1 &
+        # Gate DNS responder (ADDENDUM #2 execution 2; bind +
+        # server-list cure ADDENDUM #3): the hosts bind-mount never
+        # redirected the device (netd reads the hosts file at its
+        # own start; every gate execution printed 'ping: unknown
+        # host' and the device loaded the LIVE bytes via public DNS
+        # instead). Execution 2 pointed the emulator's DNS at this
+        # responder via '-dns-server 10.0.2.2' with the responder on
+        # 127.0.0.1 — and no device query ever arrived (WebView:
+        # ERR_NAME_NOT_RESOLVED): '10.0.2.2' is the GUEST-side alias
+        # of the host loopback, not a host address, so as a proxy
+        # upstream in the host namespace it routes nowhere; and if
+        # slirp delivers the guest's UDP/53 to a non-loopback host
+        # interface, a loopback-only bind cannot hear it either.
+        # The cure (emulator step below + this bind): the server
+        # list leads with the runner's own loopback AND keeps
+        # 10.0.2.2, and the responder binds 0.0.0.0 so whichever
+        # host interface carries the device query, it is answered.
+        # The responder answers the production hostname with
+        # 10.0.2.2 (the guest-side route to the rig) and forwards
+        # everything else to the runner's upstream.
+        sudo nohup python3 tools/gate-dns.py --name "$HOST" --bind 0.0.0.0 \
+          > "$RIG_DIR/dns.log" 2>&1 &
+        sleep 2
+        head -n 2 "$RIG_DIR/dns.log" || true
+        python3 - "$HOST" <<'PY' || echo "gate-dns self-check FAILED (see dns log in evidence)"
+        import socket, struct, sys
+        name = sys.argv[1]
+        q = b"".join(bytes([len(p)]) + p.encode() for p in name.split(".")) + b"\x00"
+        pkt = struct.pack(">HHHHHH", 0x4744, 0x0100, 1, 0, 0, 0) + q + struct.pack(">HH", 1, 1)
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(4)
+        s.sendto(pkt, ("127.0.0.1", 53))
+        resp, _ = s.recvfrom(4096)
+        an = struct.unpack(">H", resp[6:8])[0]
+        print(f"gate-dns self-check: answers={an} rdata_tail={resp[-4:]!r}")
+        assert an >= 1 and resp[-4:] == socket.inet_aton("10.0.2.2"), "fixture answer wrong"
+        print("gate-dns self-check PASS: production hostname -> 10.0.2.2")
+        PY
+        head -n 2 "$RIG_DIR/rig.log" || true
+        curl -sk --cacert "$RIG_DIR/ca.crt" "https://$HOST:443/" --resolve "$HOST:443:127.0.0.1" \
+          -o /dev/null -w 'rig self-check: HTTP %{http_code}\n' || echo "rig self-check FAILED (see rig log in evidence)"
+    - name: Write gate runner wrapper (rig surgery + driver)
+      shell: bash
+      run: |
+        cat > "${RUNNER_TEMP}/gate-run.sh" <<'WRAP'
+        #!/usr/bin/env bash
+        # Runs INSIDE the emulator-runner step, device up. Performs the
+        # trust-store surgery (NO framework restart — see the
+        # note below), waits for the framework to settle after
+        # 'adb root', then execs the gate driver.
+        set -x
+        adb root || true
+        adb wait-for-device
+        # Settle wait (re-host, 2026-11-01): 'adb root' restarts adbd
+        # and the device drops offline briefly; the wallet-suite never
+        # roots, so it never races this. Do not touch the device until
+        # boot is complete AND the lock-settings service answers —
+        # the gate driver's first act (locksettings set-pin) and its
+        # uiautomator channel both depend on a settled framework.
+        for i in $(seq 1 40); do
+          bc="$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')"
+          if [ "$bc" = "1" ] && adb shell service check lock_settings 2>/dev/null | grep -q "found"; then
+            echo "WRAPPER_SETTLED after $i polls"
+            break
+          fi
+          sleep 3
+        done
+        HASH="$(openssl x509 -subject_hash_old -in "$GATE_CA_CRT" | sed -n '1p')"
+        adb shell 'rm -rf /data/local/tmp/vr-cacerts; mkdir -p /data/local/tmp/vr-cacerts; cp /apex/com.android.conscrypt/cacerts/* /data/local/tmp/vr-cacerts/ 2>/dev/null; cp /system/etc/security/cacerts/* /data/local/tmp/vr-cacerts/ 2>/dev/null; ls /data/local/tmp/vr-cacerts | wc -l'
+        adb push "$GATE_CA_CRT" "/data/local/tmp/vr-cacerts/${HASH}.0"
+        adb shell 'mount -o bind /data/local/tmp/vr-cacerts /apex/com.android.conscrypt/cacerts' || echo "CA_MOUNT_APEX_FAILED"
+        adb shell 'mount -o bind /data/local/tmp/vr-cacerts /system/etc/security/cacerts' || echo "CA_MOUNT_SYSTEM_FAILED"
+        # NO hosts bind-mount (removed, ADDENDUM #2 execution 2): it
+        # never took effect for the device resolver in any gate
+        # execution — netd reads /system/etc/hosts at its own start,
+        # before the wrapper runs — and the device silently used
+        # public DNS and loaded the live production bytes instead of
+        # the rig's. Hostname redirection happens at the emulator's
+        # DNS (-dns-server 127.0.0.1,10.0.2.2 + tools/gate-dns.py on
+        # 0.0.0.0; ADDENDUM #3 — execution 2's '-dns-server 10.0.2.2'
+        # with a loopback-bound responder never received a device
+        # query). The ping below stays as the diagnostic: with DNS
+        # redirection its resolution line must show 10.0.2.2 (the
+        # responder's answer), not 'unknown host'.
+        # NO framework restart. The wrapper previously ran
+        # 'adb shell stop; adb shell start' so the framework would
+        # re-read the bind-mounted CA store — and that restart is
+        # what starved every gate execution: in run 41387561952 the
+        # framework never returned (sys.boot_completed polled the
+        # full 60-iteration wait without success, both service-check
+        # waits exhausted, RIG_PING_FAILED, driver started against a
+        # dead framework: 'Can't find service: lock_settings', adb
+        # install failed). The wallet-suite — this pool's proven
+        # cells — never restarts the framework and never CA-mounts.
+        # The mounts precede install/launch, and the app + WebView
+        # processes fork afterwards and read the trust store from
+        # the mounted filesystem at TLS-init; a stale system_server
+        # store is not a consumer of this lane. If the CA is not
+        # trusted, the failure is visible (no rig hits), never
+        # silent — the cell grades it.
+        adb wait-for-device
+        for i in $(seq 1 20); do
+          [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ] && break
+          sleep 3
+        done
+        adb shell service check lock_settings || echo "SERVICE_UNHEALTHY_AT_START: lock_settings"
+        adb shell ping -c 1 -w 5 voidrunner-2hm7p.ondigitalocean.app || echo "RIG_PING_FAILED"
+        exec ./tools/verify-gate-wallet.sh
+        WRAP
+        chmod +x "${RUNNER_TEMP}/gate-run.sh"
+    - name: Gate cell — rig-served client, PIN-locked AVD (API ${{ inputs.api-level }})
+      uses: reactivecircus/android-emulator-runner@v2
+      env:
+        OUT: gate-evidence
+        GATE_MODE: ${{ inputs.gate-mode }}
+        GATE_HANDLE: ${{ inputs.gate-handle }}
+        SERVED_ASSET: ${{ inputs.served-asset }}
+        ORIGIN: ${{ env.GATE_ORIGIN }}
+      with:
+        api-level: ${{ inputs.api-level }}
+        target: google_apis
+        arch: x86_64
+        profile: pixel_7_pro
+        avd-name: ${{ inputs.avd-name }}
+        force-avd-creation: true
+        emulator-boot-timeout: 1200
+        ram-size: 8192
+        emulator-options: -no-window -gpu swiftshader_indirect -memory 8192 -no-boot-anim -camera-back none -camera-front none -dns-server 127.0.0.1,10.0.2.2
+        disable-animations: true
+        script: ${{ runner.temp }}/gate-run.sh
+    - name: Staging server — janitor sweep + collect staging evidence
+      if: always() && inputs.server-mode == 'staging'
+      shell: bash
+      env:
+        VR_GATE_FIXTURE_HANDLE: ${{ inputs.gate-handle }}
+      run: |
+        mkdir -p gate-evidence
+        bash tools/gate-staging/janitor.sh sweep "$GATE_BUNDLE_PATH" \
+          | tee gate-evidence/janitor-sweep.txt || echo "janitor sweep FAILED — see janitor-sweep.txt" | tee -a gate-evidence/janitor-sweep.txt
+        cp "${RUNNER_TEMP}/staging/staging-server.log" gate-evidence/staging-server.log 2>/dev/null || true
+        cp "${RUNNER_TEMP}/staging/seam-record.txt" gate-evidence/seam-record.txt 2>/dev/null || true
+        cp "${RUNNER_TEMP}/staging/staging-smoke.json" gate-evidence/staging-smoke.json 2>/dev/null || true
+        cp "${RUNNER_TEMP}/staging/health.json" gate-evidence/staging-health.json 2>/dev/null || true
+    - name: Upload gate evidence
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: gate-evidence-${{ inputs.gate-mode }}-${{ inputs.avd-name }}
+        path: |
+          gate-evidence/**
+          ${{ runner.temp }}/rig/rig.log
+          ${{ runner.temp }}/rig/dns.log
+        retention-days: 90
