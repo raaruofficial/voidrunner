@@ -99,11 +99,10 @@ jobs:
       - name: Build staging shell (release type, sealed commit + 1 const)
         run: gradle :app:assembleRelease --stacktrace
 
-      - name: Set up Gradle 8.13.2 (test project + Mock AGP)
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.13.2"
-
+      # NOTE: a second setup-gradle step in the same job is ignored
+      # ("setup only performed on first step") — the test project is
+      # therefore pinned to AGP 8.10.1, the pairing for Gradle 8.11.1.
+      # The Mock builds with its own gradlew and is unaffected.
       - name: Build gate instrumentation test APK
         working-directory: tools/ftl-gate-test
         run: gradle :app:assembleDebugAndroidTest --stacktrace
