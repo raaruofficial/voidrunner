@@ -1,0 +1,372 @@
+# VOIDRUNNER — FTL gate prep: build the staging instruments + validate
+# the FTL construction on the CI emulator (SEAL_V113 follow-on; the
+# Firebase Test Lab port of the R-1 gate cell).
+#
+# What this builds (branch ftl/r1-gate-prep ONLY — the app source is
+# the sealed v1.0.13 commit 1dd18d4 with exactly one constant changed,
+# GameConfig.GAME_URL -> the public staging origin):
+#   * voidrunner-staging-shell.apk — release build type, signed with a
+#     THROWAWAY job-local keystore (a test instrument, never a
+#     submission candidate; the sealed APK 56133172…84a8 stands).
+#   * vr-gate-test.apk — the instrumentation test APK
+#     (tools/ftl-gate-test): the gate choreography as an
+#     AndroidX/UIAutomator suite, the form FTL executes.
+#   * mock-mwa-wallet.apk — the docs-sanctioned Mock MWA Wallet at
+#     the pinned ref, built with the wallet-suite's proven recipe.
+#
+# The validate stage runs the FTL shape end-to-end on the KVM-cured
+# emulator rig: the composition (production server bundle + ANS-seam
+# epilogue) on the runner, the public staging origin served by
+# tools/ftl-gate/staging-origin.ts under the REAL staging hostname
+# (run-local CA + the gate lane's DNS responder — the same wire shape
+# FTL devices will see: real public name, real TLS, only the DNS
+# answer's address differs), then `am instrument` drives the cell.
+# Grading is by artefacts (instrument output, verdict JSON, runner
+# read-backs, origin log), never by job status alone.
+name: FTL gate prep (build + validate)
+
+on:
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: "build (APKs only) or validate (build + emulator cell)"
+        type: choice
+        options:
+          - build
+          - validate
+        default: build
+
+jobs:
+  build:
+    name: Build staging shell + gate test APK + Mock wallet
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle 8.11.1 (app build, as Android CI)
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.11.1"
+
+      - name: Throwaway job-local keystore (instrument signing only)
+        run: |
+          keytool -genkeypair -v -keystore /tmp/ftl-shell.jks -alias ftl \
+            -keyalg RSA -keysize 2048 -validity 365 \
+            -storepass ftlthrowaway -keypass ftlthrowaway \
+            -dname "CN=VOIDRUNNER FTL staging instrument, O=Test"
+          echo "KEYSTORE_FILE=/tmp/ftl-shell.jks" >> "$GITHUB_ENV"
+          echo "KEYSTORE_PASSWORD=ftlthrowaway" >> "$GITHUB_ENV"
+          echo "KEY_ALIAS=ftl" >> "$GITHUB_ENV"
+          echo "KEY_PASSWORD=ftlthrowaway" >> "$GITHUB_ENV"
+
+      - name: JVM unit tests (BridgeContractTest + standing vectors)
+        run: gradle :app:testReleaseUnitTest --stacktrace
+
+      - name: Build staging shell (release type, sealed commit + 1 const)
+        run: gradle :app:assembleRelease --stacktrace
+
+      - name: Set up Gradle 8.13.2 (test project + Mock AGP)
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.13.2"
+
+      - name: Build gate instrumentation test APK
+        working-directory: tools/ftl-gate-test
+        run: gradle :app:assembleDebugAndroidTest --stacktrace
+
+      - name: Resolve Mock MWA Wallet ref (pinned in-repo)
+        id: mockref
+        run: echo "ref=$(tr -d '[:space:]' < tools/mockwallet-ref.txt)" >> "$GITHUB_OUTPUT"
+
+      - name: Check out Mock MWA Wallet (pinned)
+        run: |
+          git clone https://github.com/solana-mobile/mock-mwa-wallet.git "${RUNNER_TEMP}/mockwallet-src"
+          git -C "${RUNNER_TEMP}/mockwallet-src" checkout "${{ steps.mockref.outputs.ref }}"
+
+      - name: Configure mock wallet key + build Mock MWA Wallet
+        env:
+          MOCK_WALLET_PRIVATE_KEY: ${{ secrets.MOCK_WALLET_PRIVATE_KEY }}
+        run: |
+          # The wallet-suite's proven recipe (see gate-suite action):
+          # local.properties carries the documented fixed-key import;
+          # build with the Mock's own gradlew.
+          cd "${RUNNER_TEMP}/mockwallet-src"
+          {
+            printf 'privateKey=%s\n' "$MOCK_WALLET_PRIVATE_KEY"
+            printf 'walletName=%s\n' "VRTestWallet"
+            printf 'sdk.dir=%s\n' "$ANDROID_HOME"
+          } > local.properties
+          chmod +x gradlew
+          ./gradlew :app:assembleDebug --console=plain --no-daemon
+
+      - name: Collect APKs + build record
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          cp app/build/outputs/apk/release/*.apk out/voidrunner-staging-shell.apk
+          cp tools/ftl-gate-test/app/build/outputs/apk/androidTest/debug/*.apk out/vr-gate-test.apk
+          MOCK_APK="$(find "${RUNNER_TEMP}/mockwallet-src/app/build/outputs/apk" -name '*.apk' | head -n 1)"
+          cp "$MOCK_APK" out/mock-mwa-wallet.apk
+          {
+            echo "branch: $(git rev-parse --abbrev-ref HEAD)"
+            echo "commit: $(git rev-parse HEAD)"
+            echo "sealed-base: 1dd18d4b1bbfb773396e7f944d7f2d456285276c (tag v1.0.13)"
+            echo "app-source-delta-vs-sealed: GameConfig.GAME_URL only (see census in FTL_CONSTRUCTION.md)"
+            (cd out && sha256sum *.apk)
+          } | tee out/build-record.txt
+          ls -la out/
+
+      - name: Upload APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: ftl-gate-apks
+          path: out/
+          retention-days: 90
+
+  validate:
+    name: Validate the FTL construction (emulator, staging origin)
+    needs: build
+    if: ${{ inputs.stage == 'validate' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      GATE_HANDLE: gatefixture113.skr
+      FIXTURE_OWNER: WGSEgS1wRKJspT4hN8Rw947nX936YdhHRbuqftue9mu
+      STAGING_HOST: voidrunner-staging.137-184-143-128.sslip.io
+      SERVED_ASSET: index-b5yayp2h.js
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enable KVM group permissions
+        run: |
+          # VERBATIM from the wallet-suite / gate-suite actions: its
+          # absence was the gate rig's root defect (emulator launched
+          # with '-accel off', 742-938 s boots, dead dump channel).
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -la /dev/kvm
+
+      - name: Install emulator runtime libraries
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libpulse0 libgl1 libegl1 libnss3 libxcb-cursor0 > /dev/null
+          ldconfig -p | grep -c libpulse || true
+
+      - name: Set up Bun (composition runtime)
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.10"
+
+      - name: Download built APKs
+        uses: actions/download-artifact@v4
+        with:
+          name: ftl-gate-apks
+          path: apks
+
+      - name: Staging server — fetch bundle, build seamed module, janitor, start, smoke
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VR_GATE_FIXTURE_HANDLE: ${{ env.GATE_HANDLE }}
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/staging" ftl-evidence
+          gh release download gate-staging-fixtures-v1 \
+            --pattern "server-actions.production.js" \
+            --dir "${RUNNER_TEMP}/staging"
+          echo "GATE_BUNDLE_PATH=${RUNNER_TEMP}/staging/server-actions.production.js" >> "$GITHUB_ENV"
+          python3 tools/gate-staging/apply-seam.py \
+            "${RUNNER_TEMP}/staging/server-actions.production.js" \
+            "${RUNNER_TEMP}/staging/server-actions.staging.js" \
+            | tee ftl-evidence/seam-record.txt
+          bash tools/gate-staging/janitor.sh assert-clean "${RUNNER_TEMP}/staging/server-actions.production.js" \
+            | tee ftl-evidence/janitor-pre.txt
+          VR_GATE_SERVER_MODULE="${RUNNER_TEMP}/staging/server-actions.staging.js" \
+          VR_GATE_FIXTURE_HANDLE="${{ env.GATE_HANDLE }}" \
+          VR_GATE_FIXTURE_OWNER="${{ env.FIXTURE_OWNER }}" \
+          VR_GATE_STAGING_PORT="8791" \
+            nohup bun tools/gate-staging/staging-server.ts > ftl-evidence/staging-server.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -s http://127.0.0.1:8791/health > ftl-evidence/staging-health.json 2>/dev/null; then break; fi
+            sleep 2
+          done
+          cat ftl-evidence/staging-health.json
+          grep -q '"ok":true' ftl-evidence/staging-health.json
+          curl -s -X POST http://127.0.0.1:8791/actions -H 'Content-Type: application/json' \
+            -d "{\"action\":\"signIn\",\"args\":{\"name\":\"${{ env.GATE_HANDLE }}\"},\"actionCallId\":\"readback-pre\"}" \
+            > ftl-evidence/readback-pre.json
+          cat ftl-evidence/readback-pre.json
+          python3 - ftl-evidence/readback-pre.json "${{ env.FIXTURE_OWNER }}" <<'PY'
+          import json, sys
+          d = json.load(open(sys.argv[1]))
+          data = d.get("data") or {}
+          assert data.get("status") == "bind_required", f"PRE: expected bind_required, got {d}"
+          assert data.get("ownerPubkey") == sys.argv[2], f"PRE: seam owner mismatch: {d}"
+          print("read-back PRE PASS: bind_required with the fixture owner")
+          PY
+
+      - name: Staging origin — CA, leaf for the staging hostname, front + DNS responder
+        run: |
+          set -euo pipefail
+          HOST="${{ env.STAGING_HOST }}"
+          RIG_DIR="${RUNNER_TEMP}/rig"
+          mkdir -p "$RIG_DIR"
+          openssl req -x509 -newkey rsa:2048 -keyout "$RIG_DIR/ca.key" -out "$RIG_DIR/ca.crt" \
+            -days 2 -nodes -subj "/CN=VOIDRUNNER ftl rig CA" 2>/dev/null
+          openssl req -newkey rsa:2048 -keyout "$RIG_DIR/leaf.key" -out "$RIG_DIR/leaf.csr" \
+            -nodes -subj "/CN=$HOST" 2>/dev/null
+          printf 'subjectAltName=DNS:%s\n' "$HOST" > "$RIG_DIR/san.cnf"
+          openssl x509 -req -in "$RIG_DIR/leaf.csr" -CA "$RIG_DIR/ca.crt" -CAkey "$RIG_DIR/ca.key" \
+            -CAcreateserial -out "$RIG_DIR/leaf.crt" -days 2 -extfile "$RIG_DIR/san.cnf" 2>/dev/null
+          echo "GATE_CA_CRT=$RIG_DIR/ca.crt" >> "$GITHUB_ENV"
+          BUN_BIN="$(which bun)"
+          sudo env VR_ORIGIN_STATIC_DIR="$GITHUB_WORKSPACE/tools/gate-fixtures/cure-public" \
+            VR_ORIGIN_UPSTREAM="http://127.0.0.1:8791" \
+            VR_ORIGIN_PORT="443" \
+            VR_ORIGIN_CERT="$RIG_DIR/leaf.crt" VR_ORIGIN_KEY="$RIG_DIR/leaf.key" \
+            nohup "$BUN_BIN" tools/ftl-gate/staging-origin.ts > "$RIG_DIR/origin.log" 2>&1 &
+          sudo nohup python3 tools/gate-dns.py --name "$HOST" --bind 0.0.0.0 \
+            > "$RIG_DIR/dns.log" 2>&1 &
+          sleep 3
+          head -n 3 "$RIG_DIR/origin.log" || true
+          # Runner-side origin checks: the public shape, end to end.
+          curl -sk --cacert "$RIG_DIR/ca.crt" --resolve "$HOST:443:127.0.0.1" \
+            "https://$HOST/" -o ftl-evidence/origin-index.html -w 'origin index: HTTP %{http_code}\n'
+          curl -sk --cacert "$RIG_DIR/ca.crt" --resolve "$HOST:443:127.0.0.1" \
+            "https://$HOST/assets/${{ env.SERVED_ASSET }}" -o ftl-evidence/origin-asset.js
+          echo "origin-served JS sha256: $(sha256sum ftl-evidence/origin-asset.js | cut -d' ' -f1) (expect 03bdb43e3b82f6e9eba27a5b35af4791f50666ca5665b17d32f883afabcf2843)"
+          sha256sum ftl-evidence/origin-asset.js | grep -q 03bdb43e3b82f6e9eba27a5b35af4791f50666ca5665b17d32f883afabcf2843
+
+      - name: Write the device wrapper (rig surgery + instrumentation run)
+        run: |
+          cat > "${RUNNER_TEMP}/ftl-run.sh" <<'WRAP'
+          #!/usr/bin/env bash
+          # Runs INSIDE the emulator-runner step, device up. Trust-store
+          # surgery exactly as the gate-suite wrapper (bind-mounted CA
+          # store, NO framework restart), the security prelude, the
+          # installs, then the instrumentation cell. Evidence lands in
+          # ftl-evidence/ regardless of outcome.
+          set -x
+          mkdir -p ftl-evidence/device-files
+          adb root || true
+          adb wait-for-device
+          for i in $(seq 1 40); do
+            bc="$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')"
+            if [ "$bc" = "1" ] && adb shell service check lock_settings 2>/dev/null | grep -q "found"; then
+              echo "WRAPPER_SETTLED after $i polls"
+              break
+            fi
+            sleep 3
+          done
+          HASH="$(openssl x509 -subject_hash_old -in "$GATE_CA_CRT" | sed -n '1p')"
+          adb shell 'rm -rf /data/local/tmp/vr-cacerts; mkdir -p /data/local/tmp/vr-cacerts; cp /apex/com.android.conscrypt/cacerts/* /data/local/tmp/vr-cacerts/ 2>/dev/null; cp /system/etc/security/cacerts/* /data/local/tmp/vr-cacerts/ 2>/dev/null; ls /data/local/tmp/vr-cacerts | wc -l'
+          adb push "$GATE_CA_CRT" "/data/local/tmp/vr-cacerts/${HASH}.0"
+          adb shell 'mount -o bind /data/local/tmp/vr-cacerts /apex/com.android.conscrypt/cacerts' || echo "CA_MOUNT_APEX_FAILED"
+          adb shell 'mount -o bind /data/local/tmp/vr-cacerts /system/etc/security/cacerts' || echo "CA_MOUNT_SYSTEM_FAILED"
+          adb wait-for-device
+          adb shell service check lock_settings || echo "SERVICE_UNHEALTHY_AT_START: lock_settings"
+          adb shell ping -c 1 -w 5 voidrunner-staging.137-184-143-128.sslip.io || echo "ORIGIN_PING_FAILED"
+          # Security prelude (PIN in place; self-locking disabled for
+          # the cell's duration — the drivers' binding recipe).
+          adb shell locksettings set-pin 1234 || true
+          adb shell locksettings verify --old 1234 || true
+          adb shell settings put system screen_off_timeout 2147483647 || true
+          adb shell settings put secure lock_screen_lock_after_timeout 2147483647 || true
+          adb shell svc power stayon usb || true
+          # Installs: mock -> app under test -> test APK.
+          adb install apks/mock-mwa-wallet.apk
+          adb install apks/voidrunner-staging-shell.apk
+          adb install apks/vr-gate-test.apk
+          adb logcat -c || true
+          # Emulator-fingerprint watcher: satisfies a fingerprint-only
+          # biometric prompt host-side while the test runs (no-op when
+          # no prompt is up). The test itself drives the PIN route.
+          ( while true; do adb emu finger touch 1 >/dev/null 2>&1; sleep 4; done ) &
+          WATCHER=$!
+          adb shell am instrument -w -r \
+            -e vrOrigin https://voidrunner-staging.137-184-143-128.sslip.io \
+            com.voidrunner.gatetest/androidx.test.runner.AndroidJUnitRunner \
+            2>&1 | tee ftl-evidence/instrument.log
+          kill $WATCHER 2>/dev/null || true
+          adb pull /sdcard/Android/data/com.voidrunner.app/files/ ftl-evidence/device-files/ || true
+          adb logcat -d > ftl-evidence/logcat.txt 2>/dev/null || true
+          ls -la ftl-evidence/device-files/ || true
+          WRAP
+          chmod +x "${RUNNER_TEMP}/ftl-run.sh"
+
+      - name: FTL-shape cell — PIN-locked AVD (API 36), staging origin
+        uses: reactivecircus/android-emulator-runner@v2
+        env:
+          GATE_CA_CRT: ${{ env.GATE_CA_CRT }}
+        with:
+          api-level: 36
+          target: google_apis
+          arch: x86_64
+          profile: pixel_7_pro
+          avd-name: ftl-gate
+          force-avd-creation: true
+          emulator-boot-timeout: 1200
+          ram-size: 8192
+          emulator-options: -no-window -gpu swiftshader_indirect -memory 8192 -no-boot-anim -camera-back none -camera-front none -dns-server 127.0.0.1,10.0.2.2
+          disable-animations: true
+          script: ${{ runner.temp }}/ftl-run.sh
+
+      - name: Read-back POST + janitor sweep + verdict assembly
+        if: always()
+        env:
+          VR_GATE_FIXTURE_HANDLE: ${{ env.GATE_HANDLE }}
+        run: |
+          set -uo pipefail
+          mkdir -p ftl-evidence
+          curl -s -X POST http://127.0.0.1:8791/actions -H 'Content-Type: application/json' \
+            -d "{\"action\":\"signIn\",\"args\":{\"name\":\"${{ env.GATE_HANDLE }}\"},\"actionCallId\":\"readback-post\"}" \
+            > ftl-evidence/readback-post.json || echo '{}' > ftl-evidence/readback-post.json
+          cat ftl-evidence/readback-post.json || true
+          if [ -n "${GATE_BUNDLE_PATH:-}" ]; then
+            bash tools/gate-staging/janitor.sh sweep "$GATE_BUNDLE_PATH" \
+              | tee ftl-evidence/janitor-post.txt || echo "janitor sweep FAILED" | tee -a ftl-evidence/janitor-post.txt
+          fi
+          cp "${RUNNER_TEMP}/rig/origin.log" ftl-evidence/origin.log 2>/dev/null || true
+          cp "${RUNNER_TEMP}/rig/dns.log" ftl-evidence/dns.log 2>/dev/null || true
+          python3 - <<'PY' | tee ftl-evidence/ftl-validation-verdict.txt
+          import json, pathlib, re
+          ev = pathlib.Path("ftl-evidence")
+          def read(p):
+              try: return (ev / p).read_text(errors="ignore")
+              except OSError: return ""
+          instrument = read("instrument.log")
+          verdict_json = {}
+          for cand in (ev / "device-files").rglob("gate-verdict.json"):
+              try: verdict_json = json.loads(cand.read_text())
+              except Exception: pass
+          pre = read("readback-pre.json"); post = read("readback-post.json")
+          origin_log = read("origin.log")
+          checks = {
+              "instrument_ok": "OK (1 test)" in instrument,
+              "verdict_json_pass": verdict_json.get("gate_verdict") == "PASS",
+              "logcat_gate_pass": "gate_verdict=PASS" in read("logcat.txt"),
+              "readback_pre_bind_required": '"bind_required"' in pre,
+              "readback_post_proof_required": '"proof_required"' in post,
+              "device_fetched_cure_asset_via_origin": ("ORIGIN static /assets/index-b5yayp2h.js" in origin_log),
+          }
+          for k, v in checks.items(): print(f"{k}={'yes' if v else 'no'}")
+          print("verdict_json:", json.dumps(verdict_json)[:800])
+          overall = all(checks.values())
+          print("ftl_validation_verdict=" + ("PASS" if overall else "FAIL"))
+          raise SystemExit(0 if overall else 1)
+          PY
+
+      - name: Upload validation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ftl-gate-validation-evidence
+          path: ftl-evidence/**
+          retention-days: 90
