@@ -243,28 +243,28 @@ runs:
         adb shell 'mount -o bind /data/local/tmp/vr-cacerts /apex/com.android.conscrypt/cacerts' || echo "CA_MOUNT_APEX_FAILED"
         adb shell 'mount -o bind /data/local/tmp/vr-cacerts /system/etc/security/cacerts' || echo "CA_MOUNT_SYSTEM_FAILED"
         adb shell 'cp /system/etc/hosts /data/local/tmp/vr-hosts && echo "10.0.2.2 voidrunner-2hm7p.ondigitalocean.app" >> /data/local/tmp/vr-hosts && mount -o bind /data/local/tmp/vr-hosts /system/etc/hosts' || echo "HOSTS_MOUNT_FAILED"
-        adb shell stop || true
-        sleep 3
-        adb shell start || true
+        # NO framework restart. The wrapper previously ran
+        # 'adb shell stop; adb shell start' so the framework would
+        # re-read the bind-mounted CA store — and that restart is
+        # what starved every gate execution: in run 41387561952 the
+        # framework never returned (sys.boot_completed polled the
+        # full 60-iteration wait without success, both service-check
+        # waits exhausted, RIG_PING_FAILED, driver started against a
+        # dead framework: 'Can't find service: lock_settings', adb
+        # install failed). The wallet-suite — this pool's proven
+        # cells — never restarts the framework and never CA-mounts.
+        # The mounts precede install/launch, and the app + WebView
+        # processes fork afterwards and read the trust store from
+        # the mounted filesystem at TLS-init; a stale system_server
+        # store is not a consumer of this lane. If the CA is not
+        # trusted, the failure is visible (no rig hits), never
+        # silent — the cell grades it.
         adb wait-for-device
-        for i in $(seq 1 60); do
+        for i in $(seq 1 20); do
           [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ] && break
           sleep 3
         done
-        # boot_completed alone is not device readiness: after the
-        # framework restart the property can read 1 while the
-        # services the driver needs are still registering — gate-r1
-        # 41376638806 hit 'lock_settings: Broken pipe' and gate-r2
-        # 41383480503 hit 'Can't find service: lock_settings' plus a
-        # failed adb install on exactly that race. Wait for the
-        # services themselves before handing over to the driver.
-        for svc in lock_settings package activity; do
-          for i in $(seq 1 40); do
-            adb shell service check "$svc" 2>/dev/null | grep -q "found" && break
-            sleep 3
-          done
-          adb shell service check "$svc" || echo "SERVICE_CHECK_TIMEOUT: $svc"
-        done
+        adb shell service check lock_settings || echo "SERVICE_UNHEALTHY_AT_START: lock_settings"
         adb shell ping -c 1 -w 5 voidrunner-2hm7p.ondigitalocean.app || echo "RIG_PING_FAILED"
         exec ./tools/verify-gate-wallet.sh
         WRAP
