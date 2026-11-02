@@ -251,6 +251,20 @@ runs:
           [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ] && break
           sleep 3
         done
+        # boot_completed alone is not device readiness: after the
+        # framework restart the property can read 1 while the
+        # services the driver needs are still registering — gate-r1
+        # 41376638806 hit 'lock_settings: Broken pipe' and gate-r2
+        # 41383480503 hit 'Can't find service: lock_settings' plus a
+        # failed adb install on exactly that race. Wait for the
+        # services themselves before handing over to the driver.
+        for svc in lock_settings package activity; do
+          for i in $(seq 1 40); do
+            adb shell service check "$svc" 2>/dev/null | grep -q "found" && break
+            sleep 3
+          done
+          adb shell service check "$svc" || echo "SERVICE_CHECK_TIMEOUT: $svc"
+        done
         adb shell ping -c 1 -w 5 voidrunner-2hm7p.ondigitalocean.app || echo "RIG_PING_FAILED"
         exec ./tools/verify-gate-wallet.sh
         WRAP
