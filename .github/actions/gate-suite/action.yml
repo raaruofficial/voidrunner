@@ -76,20 +76,24 @@ runs:
       uses: gradle/actions/setup-gradle@v4
       with:
         gradle-version: "8.11.1"
-    - name: Decode mock wallet key + build Mock MWA Wallet
+    - name: Configure mock wallet key + build Mock MWA Wallet
       shell: bash
       env:
         MOCK_WALLET_PRIVATE_KEY: ${{ inputs.mock-private-key }}
       run: |
-        mkdir -p "${RUNNER_TEMP}/mockwallet-src/app/src/main/res/raw"
-        printf '%s' "$MOCK_WALLET_PRIVATE_KEY" \
-          | base64 --decode \
-          > "${RUNNER_TEMP}/mockwallet-src/app/src/main/res/raw/private_key"
+        # The wallet-suite's proven recipe, verbatim in substance:
+        # the mock reads its fixed key from local.properties (the
+        # documented configuration — mock-mwa-wallet README) and is
+        # built with its own gradlew. Two earlier gate-r1 dispatches
+        # died on this step's inventions (41374411883: system Gradle
+        # 8.11.1 vs the mock's AGP 8.13.0; 41375464775: no
+        # local.properties for build.gradle to read).
         cd "${RUNNER_TEMP}/mockwallet-src"
-        # Build with the mock repo's own wrapper (the wallet-suite
-        # recipe): the pinned system Gradle 8.11.1 cannot apply the
-        # mock's AGP 8.13.0 — gate-r1 run 41374411883 died on exactly
-        # that; the wrapper carries the compatible distribution.
+        {
+          printf 'privateKey=%s\n' "$MOCK_WALLET_PRIVATE_KEY"
+          printf 'walletName=%s\n' "VRTestWallet"
+          printf 'sdk.dir=%s\n' "$ANDROID_HOME"
+        } > local.properties
         chmod +x gradlew
         ./gradlew :app:assembleDebug --console=plain --no-daemon
         MOCK_APK="$(find "${RUNNER_TEMP}/mockwallet-src/app/build/outputs/apk" -name '*.apk' | head -n 1)"
