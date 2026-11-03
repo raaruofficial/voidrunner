@@ -512,6 +512,8 @@ public class GateFlowTest {
         boolean censusLogged = false;
         int tapAttempts = 0;
         long tapUnverifiedAt = 0;
+        int coordAttempts = 0;
+        long lastCoordAt = 0;
         while (System.currentTimeMillis() < deadline) {
             String fg = device.getCurrentPackageName();
             String fc = failCopySeen();
@@ -574,6 +576,33 @@ public class GateFlowTest {
                         sleep(1500);
                         continue;
                     }
+                }
+                // Coordinate route — some BrowserStack units never
+                // expose the WebView button to the accessibility tree
+                // at all (build 3c06c692: the census held only the
+                // panel headings for the full budget). The panel's
+                // action button sits at a measured, stable position:
+                // centre-x, ~0.70 of height (pixel-measured on build
+                // 9cfcfe79's recorded panel frame). Tap by
+                // coordinates once the panel has had time to render,
+                // throttled, and let the same tap verification +
+                // server read-backs arbitrate.
+                if (System.currentTimeMillis() - repStart > 25_000
+                        && System.currentTimeMillis() - lastCoordAt > 15_000
+                        && APP_PKG.equals(device.getCurrentPackageName())) {
+                    lastCoordAt = System.currentTimeMillis();
+                    coordAttempts++;
+                    int w = device.getDisplayWidth();
+                    int h = device.getDisplayHeight();
+                    device.click(w / 2, (int) (h * 0.70));
+                    rep.tapped = true;
+                    tapAttempts++;
+                    tapUnverifiedAt = System.currentTimeMillis();
+                    tappedAt = System.currentTimeMillis();
+                    kv(tag + "_action_tapped", actionText + " via coordinate"
+                            + " attempt " + coordAttempts);
+                    sleep(1500);
+                    continue;
                 }
                 if (!censusLogged
                         && System.currentTimeMillis() - repStart > 20_000) {
@@ -752,9 +781,16 @@ public class GateFlowTest {
             if (dir != null) {
                 //noinspection ResultOfMethodCallIgnored
                 dir.mkdirs();
-                try (FileWriter w = new FileWriter(new File(dir, "gate-verdict.json"))) {
+                File out = new File(dir, "gate-verdict.json");
+                try (FileWriter w = new FileWriter(out)) {
                     w.write(json.toString(2));
                 }
+                // BrowserStack only surfaces session assets from its
+                // own directory — mirror the verdict there so the
+                // file comes back with the build's artefacts.
+                shell("mkdir -p /sdcard/Download/assets/session_data"
+                        + " && cp " + out.getAbsolutePath()
+                        + " /sdcard/Download/assets/session_data/ 2>/dev/null");
             }
         } catch (Exception e) {
             Log.i(TAG, "verdict_file_failed=" + e.getClass().getSimpleName());
