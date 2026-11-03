@@ -195,17 +195,33 @@ public class GateFlowTest {
 
     /** The action-button tap ladder: exact text, contains text, the
      *  client's aria-label via desc (both exact and contains), then a
-     *  case-insensitive scan over every node's text+desc. */
+     *  case-insensitive scan over every node's text+desc for the FULL
+     *  label. There is deliberately NO bare-keyword scan: build
+     *  b4c78b59 (2026-11-03) phantom-tapped the sign-in form's prose
+     *  ("...yours with its wallet") half a second after SIGN IN,
+     *  before the panel even rendered, and the run bled out. */
     private String tapActionLadder(String actionText, String ariaLabel) {
         if (tapText(actionText)) return "text_exact";
         if (tapTextContaining(actionText)) return "text_contains";
         if (ariaLabel != null && tapDesc(ariaLabel)) return "desc_exact";
         if (ariaLabel != null && tapDescContaining(ariaLabel)) return "desc_contains";
-        String needle = actionText.toLowerCase();
-        if (tapNodeScan(needle)) return "node_scan";
-        // Last resort for the bind button: its aria-label keyword.
-        if (needle.contains("wallet") && tapNodeScan("wallet")) return "node_scan_wallet";
+        if (tapNodeScan(actionText.toLowerCase())) return "node_scan";
+        if (ariaLabel != null && tapNodeScan(ariaLabel.toLowerCase())) return "node_scan_aria";
         return null;
+    }
+
+    /** Panel-presence gate for the tap ladder: the wallet-action
+     *  button only exists once the post-sign-in panel renders (the
+     *  challenge copy, the button itself, or the busy state). The
+     *  ladder must never fire before this is true. */
+    private boolean panelPresent(String actionText, String ariaLabel) {
+        if (hasText(actionText) || hasTextContaining(actionText)) return true;
+        if (ariaLabel != null && (device.hasObject(By.desc(ariaLabel))
+                || device.hasObject(By.descContains(ariaLabel)))) return true;
+        if (hasTextContaining("Prove this handle") || hasTextContaining("WAITING FOR WALLET")) return true;
+        String census = nodeCensus().toLowerCase();
+        return census.contains(actionText.toLowerCase())
+                || (ariaLabel != null && census.contains(ariaLabel.toLowerCase()));
     }
 
     /** All visible texts (deduped, capped) — the sheet-evidence line. */
@@ -444,7 +460,10 @@ public class GateFlowTest {
             sleep(800);
             shell("input text " + handleLocal);
             sleep(800);
-            device.pressBack();
+            // Dismiss the keyboard with ESC, never pressBack: when
+            // no keyboard is up, BACK navigates out of the app
+            // (build 9cfcfe79's rep2 ended on the launcher).
+            shell("input keyevent 111");
             sleep(800);
             device.click(w / 2, (int) (h * 0.545));
             kv(tag + "_signin", "handle_entered_coordinate");
@@ -491,6 +510,8 @@ public class GateFlowTest {
         long tappedAt = 0;
         boolean retried = false;
         boolean censusLogged = false;
+        int tapAttempts = 0;
+        long tapUnverifiedAt = 0;
         while (System.currentTimeMillis() < deadline) {
             String fg = device.getCurrentPackageName();
             String fc = failCopySeen();
@@ -527,14 +548,32 @@ public class GateFlowTest {
                 sleep(1500);
                 continue;
             }
+            // Tap verification (runs regardless of branch): a tap
+            // that produces no wallet foreground and no busy state
+            // within 12 s did not land — clear it so the ladder can
+            // run again. (The wallet-foreground branch above
+            // `continue`s before this point whenever fg is the Mock.)
+            if (rep.tapped && tapUnverifiedAt > 0
+                    && System.currentTimeMillis() - tapUnverifiedAt > 12_000
+                    && !rep.fgSeen
+                    && !hasTextContaining("WAITING FOR WALLET")) {
+                rep.tapped = false;
+                tapUnverifiedAt = 0;
+                kv(tag + "_tap_unverified", "attempt " + tapAttempts);
+            }
             if (!rep.tapped) {
-                String how = tapActionLadder(actionText, ariaLabel);
-                if (how != null) {
-                    rep.tapped = true;
-                    tappedAt = System.currentTimeMillis();
-                    kv(tag + "_action_tapped", actionText + " via " + how);
-                    sleep(1500);
-                    continue;
+                if (panelPresent(actionText, ariaLabel)) {
+                    String how = tapActionLadder(actionText, ariaLabel);
+                    if (how != null) {
+                        rep.tapped = true;
+                        tapAttempts++;
+                        tapUnverifiedAt = System.currentTimeMillis();
+                        tappedAt = System.currentTimeMillis();
+                        kv(tag + "_action_tapped", actionText + " via " + how
+                                + " attempt " + tapAttempts);
+                        sleep(1500);
+                        continue;
+                    }
                 }
                 if (!censusLogged
                         && System.currentTimeMillis() - repStart > 20_000) {
