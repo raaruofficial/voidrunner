@@ -445,20 +445,27 @@ public class GateFlowTest {
     }
 
     /** Reset the app to a fresh profile for the proof rep. Primary:
-     *  pm clear via the instrumentation shell channel. Fallback: the
-     *  in-app SIGN OUT (clears the local session; the server-side
-     *  binding persists, which is all the proof rep needs). */
+     *  the in-app SIGN OUT (clears the local session; the server-side
+     *  binding persists, which is all the proof rep needs). Last
+     *  resort: pm clear via the instrumentation shell channel —
+     *  demoted 2026-11-02 because a mid-test force-stop of the app
+     *  package kills BrowserStack Espresso sessions. */
     private String resetAppData() {
-        shell("am force-stop " + APP_PKG);
-        sleep(600);
-        String out = shell("pm clear " + APP_PKG);
-        if (out.contains("Success")) return "pm_clear";
-        // Fallback: launch and sign out in-app.
+        // Sign-out FIRST (reordered 2026-11-02): the in-app SIGN OUT
+        // clears the local session and the server-side binding
+        // persists, which is all the proof rep needs — and it avoids
+        // the mid-test force-stop that kills BrowserStack sessions
+        // (see the Rep 1 note). pm clear remains as the last resort
+        // for rigs that tolerate it (FTL/emulator).
         launchApp();
         if (device.wait(Until.hasObject(By.text("SIGN OUT")), 45_000) && tapText("SIGN OUT")) {
             sleep(1500);
             return "sign_out";
         }
+        shell("am force-stop " + APP_PKG);
+        sleep(600);
+        String out = shell("pm clear " + APP_PKG);
+        if (out.contains("Success")) return "pm_clear";
         return "none(pm_clear said: " + out + ")";
     }
 
@@ -482,9 +489,13 @@ public class GateFlowTest {
         String pre = readback("pre"); // runner asserts bind_required too
         authenticateMock();
 
-        // Rep 1 — bind.
-        shell("am force-stop " + APP_PKG);
-        shell("pm clear " + APP_PKG);
+        // Rep 1 — bind. NO force-stop/pm-clear here: rigs provision a
+        // fresh install for the cell (app data starts empty), and
+        // BrowserStack's Espresso harness kills the session on a
+        // mid-test force-stop of the app package — proven 2026-11-02
+        // (build 8a229504: config + readback_pre + mock_auth all
+        // logged, then the run died on this exact line, verdict
+        // "Process Crashed", device left at the home screen).
         launchApp();
         Rep rep1 = new Rep();
         if (navigateToGateForm("rep1") && enterHandleAndSignIn("rep1")) {
