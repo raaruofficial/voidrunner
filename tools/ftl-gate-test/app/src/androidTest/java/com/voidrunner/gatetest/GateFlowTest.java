@@ -380,11 +380,30 @@ public class GateFlowTest {
         }
         if (!tapTextContaining("PLAY")) tapText("PLAY");
         long deadline = System.currentTimeMillis() + 120_000;
+        long navStart = System.currentTimeMillis();
+        boolean woke = false;
         while (System.currentTimeMillis() < deadline) {
             boolean formUp = !device.findObjects(By.clazz("android.widget.EditText")).isEmpty()
                     && hasText("SIGN IN");
             if (formUp) {
                 kv(tag + "_nav", "gate_form_reached");
+                return true;
+            }
+            // WebView accessibility trees can lag the render by
+            // minutes on some units (BrowserStack build bbf7dff5,
+            // 2026-11-03: the form was on screen in video while the
+            // tree stayed empty for the full nav budget, then
+            // populated late). Two countermeasures: a wake tap on an
+            // inert area to prod the tree, and at +45 s a blind
+            // proceed — the sign-in step's coordinate route plus the
+            // server read-backs arbitrate the outcome honestly.
+            if (!woke && System.currentTimeMillis() - navStart > 15_000) {
+                woke = true;
+                device.click(device.getDisplayWidth() / 2, device.getDisplayHeight() / 4);
+                sleep(2000);
+            }
+            if (System.currentTimeMillis() - navStart > 45_000) {
+                kv(tag + "_nav", "blind_proceed_tree_absent texts=" + visibleTexts());
                 return true;
             }
             for (String modal : new String[]{"OK", "CONTINUE", "START", "BEGIN", "GOT IT"}) {
@@ -404,8 +423,25 @@ public class GateFlowTest {
     private boolean enterHandleAndSignIn(String tag) {
         List<UiObject2> fields = device.findObjects(By.clazz("android.widget.EditText"));
         if (fields.isEmpty()) {
-            kv(tag + "_signin", "no_edittext");
-            return false;
+            // Coordinate route (tree absent — see the nav note): the
+            // form's field and button sit at stable relative positions
+            // in the fixed gate layout (verified against the
+            // 2026-11-03 run's video frames on the 1080x2340 unit:
+            // field centre ~ (0.50w, 0.425h), SIGN IN ~ (0.50w,
+            // 0.545h)). Type via the shell input channel, dismiss the
+            // keyboard, tap the button. The server read-backs and the
+            // bind panel's appearance arbitrate whether it landed.
+            int w = device.getDisplayWidth();
+            int h = device.getDisplayHeight();
+            device.click(w / 2, (int) (h * 0.425));
+            sleep(800);
+            shell("input text " + handleLocal);
+            sleep(800);
+            device.pressBack();
+            sleep(800);
+            device.click(w / 2, (int) (h * 0.545));
+            kv(tag + "_signin", "handle_entered_coordinate");
+            return true;
         }
         try {
             UiObject2 field = fields.get(0);
