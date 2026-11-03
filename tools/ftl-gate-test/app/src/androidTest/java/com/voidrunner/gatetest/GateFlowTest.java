@@ -536,8 +536,8 @@ public class GateFlowTest {
         long tapUnverifiedAt = 0;
         int coordAttempts = 0;
         long lastCoordAt = 0;
-        boolean wasMock = false;
-        boolean stintTapped = false;
+        String lastSheetTexts = "";
+        java.util.Map<String, Long> sheetTapAt = new java.util.HashMap<>();
         while (System.currentTimeMillis() < deadline) {
             String fg = device.getCurrentPackageName();
             String fc = failCopySeen();
@@ -549,19 +549,21 @@ public class GateFlowTest {
             }
             if (MOCK_PKG.equals(fg)) {
                 rep.fgSeen = true;
-                if (!wasMock) {
-                    // New wallet stint — the flow foregrounds the
-                    // wallet once per RPC (authorize, then sign),
-                    // and EACH stint's sheet needs its own approve
-                    // tap. The old per-rep sheetTapped latch spent
-                    // itself on the Connect sheet and left the
-                    // sign sheet's Approve untouched for the
-                    // client's full 90 s timeout (build 88a804b3 —
-                    // the frame shows the "Sign message(s)" sheet
-                    // with the real bind challenge waiting).
-                    wasMock = true;
-                    stintTapped = false;
-                    kv(tag + "_sheet_texts", visibleTexts());
+                // Sheet handling is CONTENT-DRIVEN, not latched:
+                // authorize and sign sheets can both appear inside
+                // ONE continuous wallet foregrounding (build
+                // 5cd394eb's rep1: Connect tapped, then the sign
+                // sheet waited out the 90 s timeout because the
+                // stint never ended; its rep2 proved the cure
+                // works when the sheet is reached — Approve tapped,
+                // bind completed, server state advanced). Log the
+                // sheet whenever its texts change, and tap any
+                // visible sheet action, throttled per action so a
+                // transitioning sheet is never double-tapped.
+                String texts = visibleTexts();
+                if (!texts.equals(lastSheetTexts)) {
+                    lastSheetTexts = texts;
+                    kv(tag + "_sheet_texts", texts);
                     screenshot(tag + "-sheet");
                 }
                 if (promptVisible() || hasTextContaining("Log in to")) {
@@ -569,26 +571,23 @@ public class GateFlowTest {
                     sleep(1000);
                     continue;
                 }
-                // Wallet sheet: record what it shows, then approve.
-                if (!stintTapped) {
-                    for (String action : new String[]{"Approve", "APPROVE", "Sign", "SIGN", "Connect", "CONNECT"}) {
-                        if (tapText(action) || tapTextContaining(action)) {
-                            stintTapped = true;
-                            rep.sheetTapped = true;
-                            rep.sheetAction = action;
-                            kv(tag + "_sheet_tapped", action);
-                            break;
-                        }
-                    }
-                    if (stintTapped) {
+                long nowMs = System.currentTimeMillis();
+                for (String action : new String[]{"Approve", "APPROVE", "Sign", "SIGN", "Connect", "CONNECT"}) {
+                    Long last = sheetTapAt.get(action);
+                    if (last != null && nowMs - last < 6_000) continue;
+                    if (tapText(action) || tapTextContaining(action)) {
+                        sheetTapAt.put(action, nowMs);
+                        rep.sheetTapped = true;
+                        rep.sheetAction = action;
+                        kv(tag + "_sheet_tapped", action);
                         sleep(2500);
                         satisfyAuthPrompt(15_000);
+                        break;
                     }
                 }
                 sleep(1500);
                 continue;
             }
-            wasMock = false;
             // Tap verification (runs regardless of branch): a tap
             // that produces no wallet foreground and no busy state
             // within 12 s did not land — clear it so the ladder can
