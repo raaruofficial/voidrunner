@@ -10,7 +10,20 @@ android {
     compileSdk 35
 
     defaultConfig {
-        applicationId 'com.voidrunner.gatetest'
+        // applicationId is the APP UNDER TEST's, deliberately: AGP
+        // derives the androidTest instrumentation targetPackage from
+        // this value, and the <instrumentation> element declared in
+        // src/androidTest/AndroidManifest.xml does NOT survive into
+        // the built test APK — proven 2026-11-02 by FTL matrix
+        // validation (matrix-u8qeipxlyp04a), which read the built
+        // APK's targetPackage as 'com.voidrunner.gatetest' and
+        // rejected the matrix before any device was provisioned.
+        // With this alignment the built test APK carries
+        // targetPackage 'com.voidrunner.app' (its own package
+        // becomes 'com.voidrunner.app.test'). The driver code has
+        // no dependency on its own applicationId: it drives by
+        // explicit package constants and the target context.
+        applicationId 'com.voidrunner.app'
         minSdk 28
         targetSdk 35
         versionCode 1
