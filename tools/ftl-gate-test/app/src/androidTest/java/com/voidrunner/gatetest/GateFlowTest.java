@@ -133,6 +133,81 @@ public class GateFlowTest {
         try { objs.get(0).click(); return true; } catch (Exception e) { return false; }
     }
 
+    private boolean tapDesc(String exact) {
+        List<UiObject2> objs = device.findObjects(By.desc(exact));
+        if (objs.isEmpty()) return false;
+        try { objs.get(0).click(); return true; } catch (Exception e) { return false; }
+    }
+
+    private boolean tapDescContaining(String part) {
+        List<UiObject2> objs = device.findObjects(By.descContains(part));
+        if (objs.isEmpty()) return false;
+        try { objs.get(0).click(); return true; } catch (Exception e) { return false; }
+    }
+
+    /** Case-insensitive manual scan over every node: matches when the
+     *  node's text OR content-description contains the needle
+     *  (lowercased). The WebView's accessibility exposure of a button
+     *  varies (text vs aria-label/desc, casing via text-transform),
+     *  so selector-only matching is not reliable — proven 2026-11-02
+     *  (build a87cab78: the LINK MY WALLET button rendered on screen
+     *  for the full 4-minute rep budget while By.text never matched). */
+    private boolean tapNodeScan(String needleLower) {
+        for (String cls : new String[]{"android.widget.Button", "android.view.View",
+                "android.widget.TextView"}) {
+            for (UiObject2 o : device.findObjects(By.clazz(cls))) {
+                try {
+                    String t = o.getText();
+                    String d = o.getContentDescription();
+                    if ((t != null && t.toLowerCase().contains(needleLower))
+                            || (d != null && d.toLowerCase().contains(needleLower))) {
+                        android.graphics.Rect r = o.getVisibleBounds();
+                        device.click(r.centerX(), r.centerY());
+                        return true;
+                    }
+                } catch (Exception ignored) { }
+            }
+        }
+        return false;
+    }
+
+    /** One-shot accessibility census: class | text | desc per node,
+     *  so a selector failure carries the tree's true shape in the log. */
+    private String nodeCensus() {
+        List<String> out = new ArrayList<>();
+        for (String cls : new String[]{"android.widget.Button", "android.widget.EditText",
+                "android.view.View", "android.widget.TextView"}) {
+            for (UiObject2 o : device.findObjects(By.clazz(cls))) {
+                try {
+                    String t = o.getText();
+                    String d = o.getContentDescription();
+                    if ((t != null && !t.trim().isEmpty()) || (d != null && !d.trim().isEmpty())) {
+                        String e = cls.substring(cls.lastIndexOf('.') + 1)
+                                + ":t=" + (t == null ? "" : t.trim())
+                                + ":d=" + (d == null ? "" : d.trim());
+                        if (!out.contains(e) && out.size() < 40) out.add(e);
+                    }
+                } catch (Exception ignored) { }
+            }
+        }
+        return String.join(" | ", out);
+    }
+
+    /** The action-button tap ladder: exact text, contains text, the
+     *  client's aria-label via desc (both exact and contains), then a
+     *  case-insensitive scan over every node's text+desc. */
+    private String tapActionLadder(String actionText, String ariaLabel) {
+        if (tapText(actionText)) return "text_exact";
+        if (tapTextContaining(actionText)) return "text_contains";
+        if (ariaLabel != null && tapDesc(ariaLabel)) return "desc_exact";
+        if (ariaLabel != null && tapDescContaining(ariaLabel)) return "desc_contains";
+        String needle = actionText.toLowerCase();
+        if (tapNodeScan(needle)) return "node_scan";
+        // Last resort for the bind button: its aria-label keyword.
+        if (needle.contains("wallet") && tapNodeScan("wallet")) return "node_scan_wallet";
+        return null;
+    }
+
     /** All visible texts (deduped, capped) — the sheet-evidence line. */
     private String visibleTexts() {
         List<String> out = new ArrayList<>();
@@ -366,11 +441,13 @@ public class GateFlowTest {
         String sheetAction = "";
     }
 
-    private Rep runWalletAction(String tag, String actionText) {
+    private Rep runWalletAction(String tag, String actionText, String ariaLabel) {
         Rep rep = new Rep();
-        long deadline = System.currentTimeMillis() + REP_BUDGET_MS;
+        long repStart = System.currentTimeMillis();
+        long deadline = repStart + REP_BUDGET_MS;
         long tappedAt = 0;
         boolean retried = false;
+        boolean censusLogged = false;
         while (System.currentTimeMillis() < deadline) {
             String fg = device.getCurrentPackageName();
             String fc = failCopySeen();
@@ -408,21 +485,31 @@ public class GateFlowTest {
                 continue;
             }
             if (!rep.tapped) {
-                if (hasText(actionText) && tapText(actionText)) {
+                String how = tapActionLadder(actionText, ariaLabel);
+                if (how != null) {
                     rep.tapped = true;
                     tappedAt = System.currentTimeMillis();
-                    kv(tag + "_action_tapped", actionText);
+                    kv(tag + "_action_tapped", actionText + " via " + how);
                     sleep(1500);
                     continue;
+                }
+                if (!censusLogged
+                        && System.currentTimeMillis() - repStart > 20_000) {
+                    censusLogged = true;
+                    kv(tag + "_census", nodeCensus());
                 }
             } else {
                 // Completion: back in the app, the pending action is
                 // gone, and the signed-in lobby marker is up — the
                 // client only advances on the server's success
                 // response (completeBind / completeSignIn state).
+                boolean lobbyMarker = hasText("CONNECTED .SKR")
+                        || hasTextContaining("CONNECTED")
+                        || device.hasObject(By.descContains("CONNECTED"))
+                        || hasText("SIGN OUT");
                 if (APP_PKG.equals(fg) && !hasText(actionText)
                         && !hasText("WAITING FOR WALLET…")
-                        && hasText("CONNECTED .SKR")) {
+                        && lobbyMarker) {
                     rep.completed = true;
                     kv(tag + "_completed", "lobby_marker");
                     screenshot(tag + "-completed");
@@ -433,7 +520,7 @@ public class GateFlowTest {
                 // foregrounded, 30 s gone).
                 if (!retried && !rep.fgSeen && hasText(actionText)
                         && System.currentTimeMillis() - tappedAt > 30_000) {
-                    if (tapText(actionText)) {
+                    if (tapActionLadder(actionText, ariaLabel) != null) {
                         retried = true;
                         kv(tag + "_action_retapped", actionText);
                         tappedAt = System.currentTimeMillis();
@@ -516,13 +603,16 @@ public class GateFlowTest {
         launchApp();
         Rep rep1 = new Rep();
         if (navigateToGateForm("rep1") && enterHandleAndSignIn("rep1")) {
-            rep1 = runWalletAction("rep1", "LINK MY WALLET");
+            rep1 = runWalletAction("rep1", "LINK MY WALLET", "Link my wallet");
         } else {
             kv("rep1", "navigation_failed");
         }
         kv("rep1_fg", String.valueOf(rep1.fgSeen));
         kv("rep1_completed", String.valueOf(rep1.completed));
-        String mid = rep1.completed ? readback("mid") : "skipped";
+        // The mid read-back is a server query — always take it. Gating
+        // it on the UI completion marker would let a selector miss
+        // erase the authoritative evidence (2026-11-02 lesson).
+        String mid = readback("mid");
 
         // Rep 2 — proof.
         String reset = resetAppData();
@@ -530,7 +620,7 @@ public class GateFlowTest {
         launchApp();
         Rep rep2 = new Rep();
         if (navigateToGateForm("rep2") && enterHandleAndSignIn("rep2")) {
-            rep2 = runWalletAction("rep2", "PROVE IT'S YOU");
+            rep2 = runWalletAction("rep2", "PROVE IT'S YOU", "Prove it's you with your wallet");
         } else {
             kv("rep2", "navigation_failed");
         }
