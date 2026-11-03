@@ -514,6 +514,8 @@ public class GateFlowTest {
         long tapUnverifiedAt = 0;
         int coordAttempts = 0;
         long lastCoordAt = 0;
+        boolean wasMock = false;
+        boolean stintTapped = false;
         while (System.currentTimeMillis() < deadline) {
             String fg = device.getCurrentPackageName();
             String fc = failCopySeen();
@@ -525,24 +527,38 @@ public class GateFlowTest {
             }
             if (MOCK_PKG.equals(fg)) {
                 rep.fgSeen = true;
+                if (!wasMock) {
+                    // New wallet stint — the flow foregrounds the
+                    // wallet once per RPC (authorize, then sign),
+                    // and EACH stint's sheet needs its own approve
+                    // tap. The old per-rep sheetTapped latch spent
+                    // itself on the Connect sheet and left the
+                    // sign sheet's Approve untouched for the
+                    // client's full 90 s timeout (build 88a804b3 —
+                    // the frame shows the "Sign message(s)" sheet
+                    // with the real bind challenge waiting).
+                    wasMock = true;
+                    stintTapped = false;
+                    kv(tag + "_sheet_texts", visibleTexts());
+                    screenshot(tag + "-sheet");
+                }
                 if (promptVisible() || hasTextContaining("Log in to")) {
                     satisfyAuthPrompt(20_000);
                     sleep(1000);
                     continue;
                 }
                 // Wallet sheet: record what it shows, then approve.
-                if (!rep.sheetTapped) {
-                    kv(tag + "_sheet_texts", visibleTexts());
-                    screenshot(tag + "-sheet");
+                if (!stintTapped) {
                     for (String action : new String[]{"Approve", "APPROVE", "Sign", "SIGN", "Connect", "CONNECT"}) {
                         if (tapText(action) || tapTextContaining(action)) {
+                            stintTapped = true;
                             rep.sheetTapped = true;
                             rep.sheetAction = action;
                             kv(tag + "_sheet_tapped", action);
                             break;
                         }
                     }
-                    if (rep.sheetTapped) {
+                    if (stintTapped) {
                         sleep(2500);
                         satisfyAuthPrompt(15_000);
                     }
@@ -550,6 +566,7 @@ public class GateFlowTest {
                 sleep(1500);
                 continue;
             }
+            wasMock = false;
             // Tap verification (runs regardless of branch): a tap
             // that produces no wallet foreground and no busy state
             // within 12 s did not land — clear it so the ladder can
