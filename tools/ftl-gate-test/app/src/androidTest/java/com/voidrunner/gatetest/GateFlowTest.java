@@ -431,6 +431,13 @@ public class GateFlowTest {
             // 0.545h)). Type via the shell input channel, dismiss the
             // keyboard, tap the button. The server read-backs and the
             // bind panel's appearance arbitrate whether it landed.
+            // Guard: never spray coordinate taps at another app or
+            // the launcher (rep2 of build 9cfcfe79 backed out to the
+            // home screen when the app was not foreground).
+            if (!APP_PKG.equals(device.getCurrentPackageName())) {
+                kv(tag + "_signin", "coordinate_aborted fg=" + device.getCurrentPackageName());
+                return false;
+            }
             int w = device.getDisplayWidth();
             int h = device.getDisplayHeight();
             device.click(w / 2, (int) (h * 0.425));
@@ -625,6 +632,22 @@ public class GateFlowTest {
         kv("config", "handle=" + handleFull + " origin=" + origin);
 
         try { device.wakeUp(); } catch (Exception ignored) { }
+
+        // Security prelude — the rig contract the FTL wrapper used to
+        // provide host-side (locksettings set-pin before the cell).
+        // On BrowserStack nobody sets it, and without a secure lock
+        // screen the Mock wallet CRASHES at its first dapp authorize:
+        // its keystore encryption creates user-authentication-bound
+        // keys, which Android refuses without a lock screen
+        // ("Secure lock screen must be enabled to create keys
+        // requiring user authentication" — device log, BrowserStack
+        // build 9cfcfe79, 2026-11-03; the client correctly reported
+        // "Wallet signing didn't complete" for the dead wallet).
+        // Set the PIN first, before any wallet interaction.
+        String pinOut = shell("locksettings set-pin " + pin);
+        sleep(600);
+        String pinVerify = shell("locksettings verify --old " + pin);
+        kv("pin_prelude", "set=[" + pinOut.trim() + "] verify=[" + pinVerify.trim() + "]");
 
         String pre = readback("pre"); // runner asserts bind_required too
         authenticateMock();
