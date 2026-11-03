@@ -295,11 +295,15 @@ public class GateFlowTest {
      *  progression: while the form is absent, a lone modal button from
      *  the known progression set is tapped and logged. */
     private boolean navigateToGateForm(String tag) {
-        if (!device.wait(Until.hasObject(By.text("PLAY")), 60_000)) {
+        // Contains-matching for PLAY: the shell label carries a glyph
+        // prefix ("▶ PLAY"), so exact-text can never match it — proven
+        // 2026-11-02 (BrowserStack build ee3c83f9: play_absent logged
+        // with "▶ PLAY" present in the dumped visible texts).
+        if (!device.wait(Until.hasObject(By.textContains("PLAY")), 60_000)) {
             kv(tag + "_nav", "play_absent texts=" + visibleTexts());
             return false;
         }
-        tapText("PLAY");
+        if (!tapTextContaining("PLAY")) tapText("PLAY");
         long deadline = System.currentTimeMillis() + 120_000;
         while (System.currentTimeMillis() < deadline) {
             boolean formUp = !device.findObjects(By.clazz("android.widget.EditText")).isEmpty()
@@ -444,29 +448,42 @@ public class GateFlowTest {
         return rep;
     }
 
-    /** Reset the app to a fresh profile for the proof rep. Primary:
-     *  the in-app SIGN OUT (clears the local session; the server-side
-     *  binding persists, which is all the proof rep needs). Last
-     *  resort: pm clear via the instrumentation shell channel —
-     *  demoted 2026-11-02 because a mid-test force-stop of the app
-     *  package kills BrowserStack Espresso sessions. */
+    /** Reset the app to a fresh profile for the proof rep: navigate
+     *  to the gate panel and use the in-app SIGN OUT (clears the
+     *  local session; the server-side binding persists, which is all
+     *  the proof rep needs). Shell-level resets (force-stop, pm
+     *  clear) are FORBIDDEN in this suite: they kill the app process
+     *  mid-test, which ends BrowserStack Espresso sessions outright
+     *  (proven twice, 2026-11-02). */
     private String resetAppData() {
-        // Sign-out FIRST (reordered 2026-11-02): the in-app SIGN OUT
-        // clears the local session and the server-side binding
-        // persists, which is all the proof rep needs — and it avoids
-        // the mid-test force-stop that kills BrowserStack sessions
-        // (see the Rep 1 note). pm clear remains as the last resort
-        // for rigs that tolerate it (FTL/emulator).
+        // The SIGN OUT control lives in the WebView gate panel, not
+        // on the shell home — navigate via PLAY first, then poll for
+        // it (the 2026-11-02 run ee3c83f9 waited 45 s on the home
+        // screen for a control that was never there). If the sign-in
+        // form is up instead, the app is already in the reset state
+        // the proof rep needs. NO force-stop/pm-clear fallback: both
+        // kill the app process, which ends BrowserStack sessions
+        // outright (proven twice, 2026-11-02), while a "none" reset
+        // still lets the rep run and log honestly.
         launchApp();
-        if (device.wait(Until.hasObject(By.text("SIGN OUT")), 45_000) && tapText("SIGN OUT")) {
-            sleep(1500);
-            return "sign_out";
+        if (!device.wait(Until.hasObject(By.textContains("PLAY")), 30_000)) {
+            return "none(no_play texts=" + visibleTexts() + ")";
         }
-        shell("am force-stop " + APP_PKG);
-        sleep(600);
-        String out = shell("pm clear " + APP_PKG);
-        if (out.contains("Success")) return "pm_clear";
-        return "none(pm_clear said: " + out + ")";
+        if (!tapTextContaining("PLAY")) tapText("PLAY");
+        long deadline = System.currentTimeMillis() + 60_000;
+        while (System.currentTimeMillis() < deadline) {
+            if (hasText("SIGN OUT") || hasTextContaining("SIGN OUT")) {
+                if (tapText("SIGN OUT") || tapTextContaining("SIGN OUT")) {
+                    sleep(1500);
+                    return "sign_out";
+                }
+            }
+            boolean formUp = !device.findObjects(By.clazz("android.widget.EditText")).isEmpty()
+                    && hasText("SIGN IN");
+            if (formUp) return "already_signed_out";
+            sleep(1500);
+        }
+        return "none(texts=" + visibleTexts() + ")";
     }
 
     // ------------------------------------------------------------------
