@@ -315,6 +315,26 @@ public class GateFlowTest {
                 || (MOCK_PKG.equals(device.getCurrentPackageName()) && hasTextContaining("Authenticate") && hasTextContaining("PIN"));
     }
 
+    /** If the device's secure keyguard is showing (its PIN pad
+     *  carries an "Emergency call" key), unlock it with the rig
+     *  PIN. A no-op everywhere else. Build 5b23da5e lost both reps
+     *  to a keyguard that engaged during setup. */
+    private void dismissKeyguardIfPresent(String where) {
+        try {
+            if (!hasText("Emergency call")) return;
+            kv("keyguard_unlock", where);
+            try { device.wakeUp(); } catch (Exception ignored) { }
+            for (String d : new String[]{"1", "2", "3", "4"}) {
+                tapText(d);
+                sleep(250);
+            }
+            tapText("OK");
+            sleep(1500);
+        } catch (Exception e) {
+            kv("keyguard_unlock_failed", where + " " + e.getClass().getSimpleName());
+        }
+    }
+
     private boolean satisfyAuthPrompt(long budgetMs) {
         long deadline = System.currentTimeMillis() + budgetMs;
         boolean acted = false;
@@ -349,6 +369,7 @@ public class GateFlowTest {
 
     private void authenticateMock() {
         try {
+            dismissKeyguardIfPresent("mock_auth");
             device.pressHome();
             sleep(800);
             Intent intent = new Intent().setComponent(ComponentName.unflattenFromString(MOCK_ACT))
@@ -386,6 +407,7 @@ public class GateFlowTest {
      *  progression: while the form is absent, a lone modal button from
      *  the known progression set is tapped and logged. */
     private boolean navigateToGateForm(String tag) {
+        dismissKeyguardIfPresent(tag + "_nav");
         // Contains-matching for PLAY: the shell label carries a glyph
         // prefix ("▶ PLAY"), so exact-text can never match it — proven
         // 2026-11-02 (BrowserStack build ee3c83f9: play_absent logged
@@ -671,6 +693,7 @@ public class GateFlowTest {
      *  mid-test, which ends BrowserStack Espresso sessions outright
      *  (proven twice, 2026-11-02). */
     private String resetAppData() {
+        dismissKeyguardIfPresent("reset");
         // The SIGN OUT control lives in the WebView gate panel, not
         // on the shell home — navigate via PLAY first, then poll for
         // it (the 2026-11-02 run ee3c83f9 waited 45 s on the home
@@ -733,6 +756,15 @@ public class GateFlowTest {
         sleep(600);
         String pinVerify = shell("locksettings verify --old " + pin);
         kv("pin_prelude", "set=[" + pinOut.trim() + "] verify=[" + pinVerify.trim() + "]");
+        // Keep the device awake and unlocked for the whole cell:
+        // build 5b23da5e's unit idled into its secure keyguard
+        // during setup and both reps nav-failed against the PIN
+        // pad. Pooled units may also arrive with a credential
+        // already set (set-pin then refuses; verify above is the
+        // arbiter — 1234 verified on that unit too).
+        shell("settings put system screen_off_timeout 1800000");
+        shell("svc power stayon true");
+        dismissKeyguardIfPresent("prelude");
 
         String pre = readback("pre"); // runner asserts bind_required too
         authenticateMock();
